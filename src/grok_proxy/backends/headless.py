@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import tempfile
@@ -45,6 +46,45 @@ def _redact_secrets(text: str) -> str:
     return out
 
 
+def _tool_arguments(raw: dict[str, Any]) -> dict[str, Any]:
+    """Pull tool args from the various shapes Grok streaming-json uses."""
+    for key in (
+        "arguments",
+        "input",
+        "args",
+        "parameters",
+        "toolInput",
+        "tool_input",
+        "rawInput",
+    ):
+        val = raw.get(key)
+        if isinstance(val, dict) and val:
+            return val
+        if isinstance(val, str) and val.strip():
+            try:
+                parsed = json.loads(val)
+            except json.JSONDecodeError:
+                return {"value": val.strip()[:200]}
+            if isinstance(parsed, dict) and parsed:
+                return parsed
+    picked: dict[str, Any] = {}
+    for key in (
+        "path",
+        "file",
+        "file_path",
+        "target_file",
+        "target_directory",
+        "command",
+        "cmd",
+        "pattern",
+        "query",
+        "url",
+    ):
+        if raw.get(key):
+            picked[key] = raw[key]
+    return picked
+
+
 def map_streaming_event(raw: dict[str, Any]) -> BackendEvent | None:
     """Map Grok streaming-json event dicts to BackendEvent."""
     etype = str(raw.get("type") or "")
@@ -59,7 +99,7 @@ def map_streaming_event(raw: dict[str, Any]) -> BackendEvent | None:
             data={
                 "id": raw.get("id") or raw.get("toolCallId") or raw.get("call_id"),
                 "name": raw.get("name") or raw.get("toolName") or raw.get("tool"),
-                "arguments": raw.get("arguments") or raw.get("input") or raw.get("args") or {},
+                "arguments": _tool_arguments(raw),
                 "title": raw.get("title") or raw.get("description"),
             },
             raw=raw,

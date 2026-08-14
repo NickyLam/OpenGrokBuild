@@ -72,5 +72,5 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 ## Notes
 
 - Non-stream chat uses the orchestrator and returns `grok.response_id`.
-- Stream is journal-backed; long agent tasks may prefer **Responses API** clients later.
+- Stream is journal-backed. Tool calls are rendered as Markdown lists in `delta.content` (WorkBuddy Custom models have no native tool cards here).
 - Do not point WorkBuddy at a publicly bound host without auth review.

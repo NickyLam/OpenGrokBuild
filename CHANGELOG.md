@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Chat Completions SSE now renders Grok tool calls as Markdown lists (read/search/run), so WorkBuddy no longer shows one unformatted blob.
 - Client install / timeout: proxy timeouts now finish chat streams with `finish_reason=length` plus a visible continue notice, and persist `session_id` so the next turn can resume.
 - Known capabilities for `grok-4.6` (500k context). Client default reasoning is `high`, not `xhigh`.
 - Default `GROK_PROXY_DEFAULT_TIMEOUT_SEC` is 1800 (was 600).

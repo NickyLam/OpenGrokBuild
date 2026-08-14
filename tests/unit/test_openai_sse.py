@@ -4,7 +4,11 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from grok_proxy.openai_sse import stream_openai_sse_from_journal
+from grok_proxy.openai_sse import (
+    format_tool_markdown,
+    render_tool_markdown_group,
+    stream_openai_sse_from_journal,
+)
 from grok_proxy.storage.models import EventRecord
 
 
@@ -169,6 +173,51 @@ async def test_incomplete_timeout_uses_length_and_notice():
     assert final["grok"]["code"] == "timeout"
     assert final["grok"]["status"] == "incomplete"
     assert chunks[-1] == "[DONE]"
+
+
+def test_format_tool_markdown_uses_path_and_label():
+    label, target = format_tool_markdown(
+        {"name": "read_file", "arguments": {"target_file": "src/a.py"}}
+    )
+    assert label == "读文件"
+    assert target == "src/a.py"
+    md = render_tool_markdown_group([(label, target), (label, target), ("运行", "pytest")])
+    assert "- **读文件** `src/a.py` ×2" in md
+    assert "- **运行** `pytest`" in md
+
+
+async def test_tool_calls_become_markdown_content():
+    records = [
+        _record(1, "response.output_text.delta", {"delta": "先看文件"}),
+        _record(
+            2,
+            "response.tool_call.started",
+            {"name": "read_file", "arguments": {"path": "README.md"}},
+        ),
+        _record(
+            3,
+            "response.tool_call.started",
+            {"name": "read_file", "arguments": {"path": "README.md"}},
+        ),
+        _record(
+            4,
+            "response.tool_call.started",
+            {"name": "run_terminal_command", "arguments": {"command": "ls"}},
+        ),
+        _record(5, "response.output_text.delta", {"delta": "看完了"}),
+        _record(6, "response.completed", {"session_id": "s"}),
+    ]
+    chunks = await _collect(stream_openai_sse_from_journal(_journal(records), model="grok-4.6"))
+    contents = [
+        (c.get("choices") or [{}])[0].get("delta", {}).get("content")
+        for c in chunks
+        if isinstance(c, dict)
+    ]
+    text = "".join(x for x in contents if x)
+    assert "先看文件" in text
+    assert "- **读文件** `README.md` ×2" in text
+    assert "- **运行** `ls`" in text
+    assert text.index("先看文件") < text.index("读文件") < text.index("看完了")
 
 
 async def test_no_terminal_event_synthesizes_finish_and_done():

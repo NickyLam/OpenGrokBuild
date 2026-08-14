@@ -9,9 +9,105 @@ from typing import Any
 from grok_proxy.errors import timeout_client_notice
 from grok_proxy.grok_runner import map_usage
 
+# Chat clients (WorkBuddy) only render delta.content. Map Grok tool events
+# to compact Markdown so a coding-agent run is not one unformatted blob.
+_TOOL_LABELS: dict[str, str] = {
+    "read_file": "读文件",
+    "read": "读文件",
+    "list_dir": "列出目录",
+    "ls": "列出目录",
+    "grep": "搜索",
+    "search_replace": "改文件",
+    "str_replace": "改文件",
+    "write": "写文件",
+    "write_file": "写文件",
+    "run_terminal_command": "运行",
+    "bash": "运行",
+    "shell": "运行",
+    "todo_write": "待办",
+    "spawn_subagent": "子任务",
+    "get_command_or_subagent_output": "查子任务",
+    "ask_user_question": "提问",
+    "search_tool": "搜工具",
+}
+
+_TARGET_KEYS = (
+    "path",
+    "file",
+    "file_path",
+    "target_file",
+    "target_directory",
+    "command",
+    "cmd",
+    "pattern",
+    "query",
+    "url",
+    "id",
+)
+
 
 def new_completion_id() -> str:
     return f"chatcmpl-{uuid.uuid4().hex}"
+
+
+def _coerce_tool_args(raw: object) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"value": raw.strip()[:200]}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _tool_target(args: dict[str, Any]) -> str:
+    for key in _TARGET_KEYS:
+        val = args.get(key)
+        if val is None or val == "":
+            continue
+        text = " ".join(str(val).split())
+        if len(text) > 120:
+            text = text[:117] + "..."
+        return text
+    for val in args.values():
+        if isinstance(val, str) and val.strip() and len(val) < 160:
+            return " ".join(val.split())
+    return ""
+
+
+def format_tool_markdown(payload: dict[str, Any]) -> tuple[str, str]:
+    """Return (label, target) for one tool_call payload."""
+    name = str(payload.get("name") or payload.get("title") or "tool").strip() or "tool"
+    label = _TOOL_LABELS.get(name, name)
+    args = _coerce_tool_args(payload.get("arguments"))
+    if not args:
+        args = _coerce_tool_args(payload.get("input"))
+    return label, _tool_target(args)
+
+
+def render_tool_markdown_group(items: list[tuple[str, str]]) -> str:
+    """Collapse consecutive identical tools into a Markdown list."""
+    if not items:
+        return ""
+    lines: list[str] = []
+    i = 0
+    while i < len(items):
+        label, target = items[i]
+        n = 1
+        while i + n < len(items) and items[i + n] == (label, target):
+            n += 1
+        if target:
+            line = f"- **{label}** `{target}`"
+        else:
+            line = f"- **{label}**"
+        if n > 1:
+            line += f" ×{n}"
+        lines.append(line)
+        i += n
+    return "\n\n" + "\n".join(lines) + "\n\n"
 
 
 def sse_data(obj: dict[str, Any] | str) -> str:
@@ -187,6 +283,7 @@ async def stream_openai_sse_from_journal(
     Map orchestrator journal events (EventRecord) to OpenAI chat.completion SSE.
 
     - response.output_text.delta -> content chunks
+    - response.tool_call.started -> Markdown list (WorkBuddy has no tool UI here)
     - response.permission.required -> optional nonstandard grok extension (type permission)
     - response.completed / failed / cancelled / incomplete -> finish + [DONE]
     """
@@ -194,6 +291,12 @@ async def stream_openai_sse_from_journal(
     created = int(time.time())
     saw_terminal = False
     session_id: str | None = None
+    pending_tools: list[tuple[str, str]] = []
+
+    def _flush_tools() -> str:
+        text = render_tool_markdown_group(pending_tools)
+        pending_tools.clear()
+        return text
 
     # role chunk first (OpenAI convention)
     yield sse_data(
@@ -216,7 +319,19 @@ async def stream_openai_sse_from_journal(
         if not isinstance(payload, dict):
             payload = {}
 
-        if etype == "response.output_text.delta":
+        if etype == "response.tool_call.started":
+            pending_tools.append(format_tool_markdown(payload))
+        elif etype == "response.output_text.delta":
+            tools = _flush_tools()
+            if tools:
+                yield sse_data(
+                    chunk_delta(
+                        completion_id=completion_id,
+                        model=model,
+                        created=created,
+                        content=tools,
+                    )
+                )
             chunk = payload.get("delta")
             if chunk:
                 yield sse_data(
@@ -228,6 +343,16 @@ async def stream_openai_sse_from_journal(
                     )
                 )
         elif etype == "response.permission.required":
+            tools = _flush_tools()
+            if tools:
+                yield sse_data(
+                    chunk_delta(
+                        completion_id=completion_id,
+                        model=model,
+                        created=created,
+                        content=tools,
+                    )
+                )
             # Non-standard extension so chat clients can surface approvals mid-stream
             yield sse_data(
                 chunk_delta(
@@ -249,6 +374,16 @@ async def stream_openai_sse_from_journal(
             )
         elif etype == "response.completed":
             saw_terminal = True
+            tools = _flush_tools()
+            if tools:
+                yield sse_data(
+                    chunk_delta(
+                        completion_id=completion_id,
+                        model=model,
+                        created=created,
+                        content=tools,
+                    )
+                )
             session_id = payload.get("session_id") or session_id
             if on_session:
                 on_session(session_id)
@@ -280,6 +415,16 @@ async def stream_openai_sse_from_journal(
             return
         elif etype in ("response.failed", "response.cancelled", "response.incomplete"):
             saw_terminal = True
+            tools = _flush_tools()
+            if tools:
+                yield sse_data(
+                    chunk_delta(
+                        completion_id=completion_id,
+                        model=model,
+                        created=created,
+                        content=tools,
+                    )
+                )
             session_id = payload.get("session_id") or session_id
             if on_session and session_id:
                 on_session(session_id)
@@ -321,6 +466,16 @@ async def stream_openai_sse_from_journal(
             return
 
     if not saw_terminal:
+        tools = _flush_tools()
+        if tools:
+            yield sse_data(
+                chunk_delta(
+                    completion_id=completion_id,
+                    model=model,
+                    created=created,
+                    content=tools,
+                )
+            )
         yield sse_data(
             chunk_delta(
                 completion_id=completion_id,
