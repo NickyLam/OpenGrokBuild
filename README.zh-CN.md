@@ -495,7 +495,7 @@ curl -s -X POST "http://127.0.0.1:8787/v1/permissions/<id>/decision" \
 | `GROK_PROXY_DATABASE_PATH` | `~/.grok-proxy/gateway.db` | SQLite |
 | `GROK_PROXY_CWD_ALLOWLIST` | 空 | 允许的工作区前缀 |
 | `GROK_PROXY_MAX_CONCURRENT` | `10` | 全局并行数 |
-| `GROK_PROXY_DEFAULT_TIMEOUT_SEC` | `600` | 单请求超时 |
+| `GROK_PROXY_DEFAULT_TIMEOUT_SEC` | `1800` | 单请求超时（Agent 任务经常超过 10 分钟） |
 | `GROK_PROXY_DEFAULT_WORKSPACE_MODE` | `read_only` | 默认工作区模式 |
 | `GROK_PROXY_ALLOW_IN_PLACE` | `false` | 是否允许修改源目录 |
 | `GROK_PROXY_PERMISSION_TIMEOUT_SEC` | `900` | 待审批超时 |

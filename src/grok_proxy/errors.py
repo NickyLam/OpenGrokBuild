@@ -6,6 +6,15 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
 
+def timeout_client_notice(*, timeout_sec: int | float, session_id: str | None = None) -> str:
+    """Visible hint so chat clients do not treat a proxy timeout as a clean end."""
+    sid = f" Session id: {session_id}." if session_id else ""
+    return (
+        f"\n\n[proxy] Timed out after {int(timeout_sec)}s. "
+        f"Send continue to resume this run.{sid}"
+    )
+
+
 class ProxyError(Exception):
     def __init__(
         self,

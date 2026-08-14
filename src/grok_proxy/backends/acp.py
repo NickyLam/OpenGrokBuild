@@ -207,7 +207,7 @@ class AcpBackend:
                     "sessionId": session_id,
                     "prompt": [{"type": "text", "text": text}],
                 },
-                timeout=handle.request.timeout_sec or 600,
+                timeout=handle.request.timeout_sec or 1800,
             )
             if isinstance(result, dict):
                 handle.last_stop_reason = result.get("stopReason") or result.get("stop_reason")

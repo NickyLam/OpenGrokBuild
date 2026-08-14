@@ -45,7 +45,7 @@ class CreateResponseCommand:
     x_grok: GrokExtensions = field(default_factory=GrokExtensions)
     # resolved server defaults
     default_always_approve: bool = True
-    default_timeout_sec: int = 600
+    default_timeout_sec: int = 1800
     default_cwd: str = "."
     # auth / tenancy
     actor_id: str | None = None

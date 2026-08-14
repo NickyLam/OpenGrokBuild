@@ -29,6 +29,17 @@ DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 # Hard-coded fallbacks when ~/.grok/models_cache.json is missing or incomplete.
 # Prefer cache values at runtime; these keep client configs usable offline.
 _KNOWN_MODEL_CAPS: dict[str, dict[str, object]] = {
+    "grok-4.6": {
+        "display_name": "Grok 4.6",
+        "context_window": 500_000,
+        "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        "supports_images": True,
+        "supports_reasoning": True,
+        # Keep xhigh off the default WorkBuddy effort. It burns the 10-minute
+        # proxy budget on thinking before the agent finishes the task.
+        "reasoning_efforts": ["high", "medium", "low"],
+        "default_reasoning_effort": "high",
+    },
     "grok-4.5": {
         "display_name": "Grok 4.5",
         "context_window": 500_000,
@@ -96,6 +107,24 @@ def _read_models_cache_obj(cache_path: Path | None = None) -> dict[str, object] 
     return data
 
 
+def _normalize_default_reasoning_effort(
+    efforts: list[str],
+    default: str | None,
+) -> str | None:
+    """Do not default clients to xhigh — it is optional, not the install default."""
+    if not default:
+        return None
+    if default.lower() != "xhigh":
+        return default
+    for candidate in ("high", "medium", "low"):
+        if candidate in efforts:
+            return candidate
+    for item in efforts:
+        if item.lower() != "xhigh":
+            return item
+    return "high"
+
+
 def _caps_from_info(model_id: str, info: dict[str, object], *, source: str) -> ModelCapabilities:
     known = _KNOWN_MODEL_CAPS.get(model_id, {})
     display = str(info.get("name") or known.get("display_name") or model_id)
@@ -161,7 +190,11 @@ def _caps_from_info(model_id: str, info: dict[str, object], *, source: str) -> M
         supports_reasoning=supports_reasoning,
         supports_tool_call=False,
         reasoning_efforts=tuple(efforts),
-        default_reasoning_effort=default_effort if supports_reasoning else None,
+        default_reasoning_effort=(
+            _normalize_default_reasoning_effort(efforts, default_effort)
+            if supports_reasoning
+            else None
+        ),
         source=source,
     )
 

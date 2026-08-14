@@ -35,7 +35,7 @@ class GrokRunOptions:
     deny: list[str] | None = None
     reasoning_effort: str | None = None
     worktree: str | bool | None = None
-    timeout_sec: int = 600
+    timeout_sec: int = 1800
     grok_bin: str = "grok"
     env: dict[str, str] | None = None
     # When set, argv uses --prompt-file instead of embedding prompt after -p

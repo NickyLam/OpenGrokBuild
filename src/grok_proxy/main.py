@@ -366,6 +366,7 @@ def create_app(
         *,
         model: str,
         response_id: str | None = None,
+        finish_reason: str = "stop",
     ) -> ChatCompletionResponse:
         pt, ct, tt = map_usage(result.usage)
         return ChatCompletionResponse(
@@ -375,7 +376,7 @@ def create_app(
             choices=[
                 Choice(
                     message=ChatMessageOut(content=result.text),
-                    finish_reason="stop",
+                    finish_reason=finish_reason,
                 )
             ],
             usage=Usage(
@@ -603,7 +604,10 @@ def create_app(
             usage=rec.usage_json,
             exit_code=0 if rec.status == "completed" else 1,
         )
-        payload = _to_openai_response(result, model=model, response_id=rec.id).model_dump()
+        finish = "length" if rec.status == "incomplete" else "stop"
+        payload = _to_openai_response(
+            result, model=model, response_id=rec.id, finish_reason=finish
+        ).model_dump()
         return JSONResponse(content=payload)
 
     app.include_router(build_responses_router(require_auth=require_auth, get_cfg=get_cfg))

@@ -43,7 +43,7 @@ class BackendSessionRequest:
     deny: list[str] | None = None
     reasoning_effort: str | None = None
     worktree: str | bool | None = None
-    timeout_sec: int = 600
+    timeout_sec: int = 1800
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

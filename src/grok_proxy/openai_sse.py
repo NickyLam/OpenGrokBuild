@@ -6,6 +6,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+from grok_proxy.errors import timeout_client_notice
 from grok_proxy.grok_runner import map_usage
 
 
@@ -279,12 +280,25 @@ async def stream_openai_sse_from_journal(
             return
         elif etype in ("response.failed", "response.cancelled", "response.incomplete"):
             saw_terminal = True
+            session_id = payload.get("session_id") or session_id
+            if on_session and session_id:
+                on_session(session_id)
             msg = payload.get("message") or payload.get("reason") or etype
-            code = payload.get("code")
-            finish = "stop" if etype != "response.cancelled" else "stop"
+            code = payload.get("code") or (
+                "timeout" if payload.get("reason") == "timeout" else etype.split(".")[-1]
+            )
+            is_timeout = etype == "response.incomplete" and (
+                payload.get("reason") == "timeout" or code == "timeout"
+            )
+            finish = "length" if is_timeout else "stop"
             content_prefix = ""
             if etype == "response.failed":
                 content_prefix = f"\n[error] {msg}"
+            elif is_timeout:
+                content_prefix = timeout_client_notice(
+                    timeout_sec=payload.get("timeout_sec") or 0,
+                    session_id=session_id,
+                )
             body = chunk_delta(
                 completion_id=completion_id,
                 model=model,
@@ -294,9 +308,10 @@ async def stream_openai_sse_from_journal(
                 grok={
                     "session_id": session_id,
                     "error": msg if etype == "response.failed" else None,
-                    "code": code or etype.split(".")[-1],
+                    "code": code,
                     "response_id": response_id or payload.get("id"),
                     "status": etype.split(".")[-1],
+                    "stop_reason": "timeout" if is_timeout else None,
                 },
             )
             if content_prefix:

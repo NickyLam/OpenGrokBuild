@@ -99,3 +99,43 @@ def test_get_model_capabilities_known_fallback():
     assert caps.context_window == 500_000
     assert caps.supports_images is True
     assert caps.supports_reasoning is True
+
+
+def test_get_model_capabilities_grok_46_known():
+    caps = get_model_capabilities("grok-4.6", cache_path=Path("/nonexistent/models_cache.json"))
+    assert caps.display_name == "Grok 4.6"
+    assert caps.context_window == 500_000
+    assert caps.default_reasoning_effort == "high"
+    assert "xhigh" not in caps.reasoning_efforts
+    assert caps.source == "known"
+
+
+def test_get_model_capabilities_does_not_default_xhigh(tmp_path: Path):
+    cache = tmp_path / "models_cache.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "models": {
+                    "grok-4.6": {
+                        "info": {
+                            "id": "grok-4.6",
+                            "name": "Grok 4.6",
+                            "context_window": 500_000,
+                            "supports_reasoning_effort": True,
+                            "reasoning_effort": "xhigh",
+                            "reasoning_efforts": [
+                                {"id": "xhigh", "value": "xhigh", "default": True},
+                                {"id": "high", "value": "high"},
+                                {"id": "medium", "value": "medium"},
+                                {"id": "low", "value": "low"},
+                            ],
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    caps = get_model_capabilities("grok-4.6", cache_path=cache)
+    assert caps.default_reasoning_effort == "high"
+    assert "xhigh" in caps.reasoning_efforts

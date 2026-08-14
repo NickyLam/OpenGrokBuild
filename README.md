@@ -500,7 +500,7 @@ Do **not** expose this to the public internet without extra controls. Full notes
 | `GROK_PROXY_DATABASE_PATH` | `~/.grok-proxy/gateway.db` | SQLite |
 | `GROK_PROXY_CWD_ALLOWLIST` | empty | Allowed workspace prefixes |
 | `GROK_PROXY_MAX_CONCURRENT` | `10` | Global parallel runs |
-| `GROK_PROXY_DEFAULT_TIMEOUT_SEC` | `600` | Per-request timeout |
+| `GROK_PROXY_DEFAULT_TIMEOUT_SEC` | `1800` | Per-request timeout (agent runs often exceed 10 minutes) |
 | `GROK_PROXY_DEFAULT_WORKSPACE_MODE` | `read_only` | Default workspace mode |
 | `GROK_PROXY_ALLOW_IN_PLACE` | `false` | Allow source cwd mutation |
 | `GROK_PROXY_PERMISSION_TIMEOUT_SEC` | `900` | Pending approval TTL |

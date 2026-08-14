@@ -59,7 +59,7 @@ class Settings(BaseSettings):
         validation_alias=_alias("GROK_PROXY_MAX_CONCURRENT", "max_concurrent"),
     )
     default_timeout_sec: int = Field(
-        default=600,
+        default=1800,
         validation_alias=_alias("GROK_PROXY_DEFAULT_TIMEOUT_SEC", "default_timeout_sec"),
     )
     # Empty / "auto" / "grok-build" → resolved from `grok models` / models_cache at bootstrap

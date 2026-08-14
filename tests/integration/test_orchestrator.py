@@ -133,6 +133,45 @@ async def test_runs_dict_cleaned_after_terminal(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_timeout_keeps_session_and_notice(tmp_path):
+    db = open_database(tmp_path / "to.db")
+    fake = FakeBackend(
+        script=[
+            BackendEvent(
+                type="text",
+                data={"text": "working", "session_id": "sess-live"},
+            ),
+            BackendEvent(
+                type="end",
+                data={"session_id": "sess-live", "text": "done"},
+            ),
+        ],
+        delay_sec=0.25,
+    )
+    orch = ResponseOrchestrator(db, fake, workspace=WorkspaceManager())
+    rec = await orch.create(
+        CreateResponseCommand(
+            model="m",
+            input_text="hi",
+            x_grok=GrokExtensions(cwd=str(tmp_path), timeout_sec=0.4),
+            default_cwd=str(tmp_path),
+            default_timeout_sec=0.4,
+        )
+    )
+    assert rec.status == "incomplete"
+    assert rec.error_code == "timeout"
+    assert rec.session_id == "sess-live"
+    assert "working" in rec.text
+    assert "[proxy] Timed out after 0s" in rec.text or "Timed out after" in rec.text
+    events = list(db.list_events(rec.id, after_sequence=0))
+    incomplete = [e for e in events if e.event_type == "response.incomplete"]
+    assert incomplete
+    assert incomplete[0].payload_json.get("session_id") == "sess-live"
+    assert incomplete[0].payload_json.get("reason") == "timeout"
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_permission_wait_pauses_response_timeout(tmp_path):
     """Human approval latency must not count against the response timeout."""
     db = open_database(tmp_path / "pt.db")

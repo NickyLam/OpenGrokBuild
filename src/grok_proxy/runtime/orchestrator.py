@@ -16,7 +16,7 @@ from grok_proxy.backends.base import (
     PromptInput,
 )
 from grok_proxy.concurrency import ConcurrencyGate, PerKeyConcurrencyTracker
-from grok_proxy.errors import ProxyError
+from grok_proxy.errors import ProxyError, timeout_client_notice
 from grok_proxy.permissions.broker import PermissionBroker
 from grok_proxy.runtime.commands import CreateResponseCommand
 from grok_proxy.runtime.process_manager import ProcessManager
@@ -391,7 +391,8 @@ class ResponseOrchestrator:
         live = self._runs.setdefault(response_id, _LiveRun(response_id=response_id))
         record = await self.get_async(response_id)
         xg = record.x_grok_json
-        timeout = int(xg.get("timeout_sec") or 600)
+        raw_timeout = xg.get("timeout_sec")
+        timeout = float(raw_timeout) if raw_timeout is not None else 1800.0
 
         try:
             sm = ResponseStateMachine(record.status)
@@ -460,12 +461,16 @@ class ResponseOrchestrator:
             usage: dict[str, Any] | None = None
             end_data: dict[str, Any] = {}
             saw_end = False
+            seen_session_id: str | None = session.session_id or record.session_id
 
             async def _consume() -> None:
-                nonlocal usage, end_data, saw_end
+                nonlocal usage, end_data, saw_end, seen_session_id
                 async for be in self.backend.events(session):
                     if live.cancel_event.is_set():
                         break
+                    sid = be.data.get("session_id")
+                    if sid:
+                        seen_session_id = str(sid)
                     await self._handle_backend_event(
                         response_id,
                         be,
@@ -507,10 +512,18 @@ class ResponseOrchestrator:
                     ResponseStatus.CANCELLED.value,
                     ResponseStatus.COMPLETED.value,
                 }:
+                    sid = (
+                        end_data.get("session_id")
+                        or seen_session_id
+                        or session.session_id
+                        or record.session_id
+                    )
+                    notice = timeout_client_notice(timeout_sec=timeout, session_id=sid)
                     record.status = ResponseStatus.INCOMPLETE.value
                     record.error_code = "timeout"
                     record.error_message = f"timed out after {timeout}s"
-                    record.text = "".join(text_parts)
+                    record.session_id = sid
+                    record.text = "".join(text_parts) + notice
                     record.completed_at = time.time()
                     if usage:
                         record.usage_json = usage
@@ -518,7 +531,14 @@ class ResponseOrchestrator:
                     await self._emit(
                         response_id,
                         "response.incomplete",
-                        {"id": response_id, "reason": "timeout"},
+                        {
+                            "id": response_id,
+                            "reason": "timeout",
+                            "code": "timeout",
+                            "timeout_sec": timeout,
+                            "session_id": sid,
+                            "message": f"timed out after {timeout}s",
+                        },
                     )
                 return
 

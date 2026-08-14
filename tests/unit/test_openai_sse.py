@@ -133,6 +133,44 @@ async def test_permission_required_emits_grok_extension_chunk():
     assert chunks[-1] == "[DONE]"
 
 
+async def test_incomplete_timeout_uses_length_and_notice():
+    seen: list[str | None] = []
+    records = [
+        _record(1, "response.output_text.delta", {"delta": "working"}),
+        _record(
+            2,
+            "response.incomplete",
+            {
+                "id": "resp_1",
+                "reason": "timeout",
+                "code": "timeout",
+                "timeout_sec": 600,
+                "session_id": "sess_to",
+                "message": "timed out after 600s",
+            },
+        ),
+    ]
+    chunks = await _collect(
+        stream_openai_sse_from_journal(
+            _journal(records),
+            model="grok-4.6",
+            response_id="resp_1",
+            on_session=seen.append,
+        )
+    )
+
+    assert seen == ["sess_to"]
+    final = chunks[-2]
+    assert final["choices"][0]["finish_reason"] == "length"
+    content = final["choices"][0]["delta"]["content"]
+    assert "Timed out after 600s" in content
+    assert "sess_to" in content
+    assert final["grok"]["session_id"] == "sess_to"
+    assert final["grok"]["code"] == "timeout"
+    assert final["grok"]["status"] == "incomplete"
+    assert chunks[-1] == "[DONE]"
+
+
 async def test_no_terminal_event_synthesizes_finish_and_done():
     records = [_record(1, "response.output_text.delta", {"delta": "hi"})]
     chunks = await _collect(
