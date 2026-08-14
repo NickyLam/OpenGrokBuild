@@ -25,7 +25,10 @@ class McpToolRouter:
         return [
             {
                 "name": "grok_consult",
-                "description": "Read-only consultation with Grok (architecture, analysis).",
+                "description": (
+                    "Read-only consultation with Grok (architecture, analysis). "
+                    "Runs in the background by default; poll response_id with grok_status."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "required": ["prompt", "cwd"],
@@ -34,12 +37,16 @@ class McpToolRouter:
                         "cwd": {"type": "string"},
                         "max_turns": {"type": "integer"},
                         "model": {"type": "string"},
+                        "background": {"type": "boolean", "default": True},
                     },
                 },
             },
             {
                 "name": "grok_review",
-                "description": "Code review of the workspace (default read-only).",
+                "description": (
+                    "Code review of the workspace (default read-only). Runs in the background "
+                    "by default; poll response_id with grok_status."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "required": ["cwd"],
@@ -48,6 +55,7 @@ class McpToolRouter:
                         "instructions": {"type": "string"},
                         "scope": {"type": "string"},
                         "model": {"type": "string"},
+                        "background": {"type": "boolean", "default": True},
                     },
                 },
             },
@@ -117,6 +125,7 @@ class McpToolRouter:
                 workspace_mode="read_only",
                 permission_policy="server",
                 max_turns=arguments.get("max_turns"),
+                background=bool(arguments.get("background", True)),
                 always_approve=True,
             )
         if name == "grok_review":
@@ -129,6 +138,7 @@ class McpToolRouter:
                 model=str(arguments.get("model") or self.default_model),
                 workspace_mode="read_only",
                 permission_policy="server",
+                background=bool(arguments.get("background", True)),
                 always_approve=True,
             )
         if name == "grok_delegate":
@@ -231,9 +241,62 @@ async def run_mcp_stdio(router: McpToolRouter) -> None:
         sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
         sys.stdout.flush()
 
+    pending: set[asyncio.Task[None]] = set()
+
+    async def _dispatch(mid: Any, method: str, params: Any) -> None:
+        try:
+            try:
+                result: Any
+                if method == "initialize":
+                    result = {
+                        "protocolVersion": str(
+                            params.get("protocolVersion") or MCP_PROTOCOL_VERSION
+                        ),
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "grok-proxy", "version": __version__},
+                    }
+                elif method == "ping":
+                    result = {}
+                elif method in ("tools/list", "list_tools"):
+                    result = {"tools": router.list_tools()}
+                elif method in ("tools/call", "call_tool"):
+                    name = params.get("name") or params.get("tool")
+                    args = params.get("arguments") or params.get("args") or {}
+                    payload = await router.call_tool(str(name), dict(args))
+                    is_error = isinstance(payload, dict) and bool(payload.get("error"))
+                    # Standard MCP tool result: content array + isError flag
+                    result = {
+                        "content": [
+                            {"type": "text", "text": json.dumps(payload, ensure_ascii=False)}
+                        ],
+                        "isError": is_error,
+                    }
+                else:
+                    _write(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": mid,
+                            "error": {"code": -32601, "message": f"method not found: {method}"},
+                        }
+                    )
+                    return
+                _write({"jsonrpc": "2.0", "id": mid, "result": result})
+            except Exception as e:  # noqa: BLE001
+                _write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": mid,
+                        "error": {"code": -32000, "message": str(e)},
+                    }
+                )
+        finally:
+            pending.discard(asyncio.current_task())
+
     while True:
         line = await asyncio.to_thread(sys.stdin.readline)
         if not line:  # EOF — client closed the pipe
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             return
         line = line.strip()
         if not line:
@@ -250,47 +313,5 @@ async def run_mcp_stdio(router: McpToolRouter) -> None:
             # Notification (e.g. notifications/initialized) — must not respond
             continue
         params = msg.get("params") or {}
-        result: Any
-        try:
-            if method == "initialize":
-                result = {
-                    "protocolVersion": str(
-                        params.get("protocolVersion") or MCP_PROTOCOL_VERSION
-                    ),
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "grok-proxy", "version": __version__},
-                }
-            elif method == "ping":
-                result = {}
-            elif method in ("tools/list", "list_tools"):
-                result = {"tools": router.list_tools()}
-            elif method in ("tools/call", "call_tool"):
-                name = params.get("name") or params.get("tool")
-                args = params.get("arguments") or params.get("args") or {}
-                payload = await router.call_tool(str(name), dict(args))
-                is_error = isinstance(payload, dict) and bool(payload.get("error"))
-                # Standard MCP tool result: content array + isError flag
-                result = {
-                    "content": [
-                        {"type": "text", "text": json.dumps(payload, ensure_ascii=False)}
-                    ],
-                    "isError": is_error,
-                }
-            else:
-                _write(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": mid,
-                        "error": {"code": -32601, "message": f"method not found: {method}"},
-                    }
-                )
-                continue
-            _write({"jsonrpc": "2.0", "id": mid, "result": result})
-        except Exception as e:  # noqa: BLE001
-            _write(
-                {
-                    "jsonrpc": "2.0",
-                    "id": mid,
-                    "error": {"code": -32000, "message": str(e)},
-                }
-            )
+        task = asyncio.create_task(_dispatch(mid, method, params))
+        pending.add(task)

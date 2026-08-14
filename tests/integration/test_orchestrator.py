@@ -56,6 +56,26 @@ async def test_orchestrator_fake_complete(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_rejects_backend_stream_without_final_event(tmp_path):
+    db = open_database(tmp_path / "no-final.db")
+    fake = FakeBackend(script=[BackendEvent(type="text", data={"text": "partial"})])
+    orch = ResponseOrchestrator(db, fake, workspace=WorkspaceManager())
+
+    rec = await orch.create(
+        CreateResponseCommand(
+            model="m",
+            input_text="hi",
+            x_grok=GrokExtensions(cwd=str(tmp_path), workspace_mode="read_only"),
+            default_cwd=str(tmp_path),
+        )
+    )
+
+    assert rec.status == "failed"
+    assert rec.error_code == "backend_no_final_event"
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_cancel(tmp_path):
     db = open_database(tmp_path / "c.db")
     fake = FakeBackend(

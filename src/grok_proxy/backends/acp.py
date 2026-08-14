@@ -59,6 +59,9 @@ class _AcpHandle:
     last_stop_reason: str | None = None
     include_thoughts: bool = False
     stderr_chunks: list[bytes] = field(default_factory=list)
+    prompt_rpc_id: int | None = None
+    prompt_result_received: bool = False
+    eof_error_emitted: bool = False
 
 
 class AcpBackend:
@@ -187,6 +190,9 @@ class AcpBackend:
         handle.prompt = prompt.text
         handle.text_acc.clear()
         handle.prompt_done.clear()
+        handle.prompt_rpc_id = None
+        handle.prompt_result_received = False
+        handle.eof_error_emitted = False
         handle.last_usage = None
         handle.last_stop_reason = None
         # Fire prompt RPC in background; stream events via notifications + result
@@ -227,7 +233,9 @@ class AcpBackend:
                     )
                 )
         except Exception as e:  # noqa: BLE001
-            if not handle.cancel.is_set():
+            if not handle.cancel.is_set() and not (
+                getattr(e, "code", None) == "acp_dead" and handle.eof_error_emitted
+            ):
                 await handle.event_queue.put(
                     BackendEvent(
                         type="error",
@@ -332,6 +340,8 @@ class AcpBackend:
         msg = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
         fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         handle.pending[rid] = fut
+        if method == "session/prompt":
+            handle.prompt_rpc_id = rid
         line = json.dumps(msg, ensure_ascii=False) + "\n"
         handle.proc.stdin.write(line.encode("utf-8"))
         await handle.proc.stdin.drain()
@@ -376,6 +386,8 @@ class AcpBackend:
                     continue
                 if "id" in msg and ("result" in msg or "error" in msg):
                     fut = handle.pending.pop(msg["id"], None)
+                    if msg["id"] == handle.prompt_rpc_id:
+                        handle.prompt_result_received = True
                     if fut and not fut.done():
                         if "error" in msg:
                             err = msg["error"]
@@ -409,7 +421,28 @@ class AcpBackend:
                 if not fut.done():
                     fut.set_exception(BackendError("ACP process ended", code="acp_dead"))
             handle.pending.clear()
-            await handle.event_queue.put(None)
+            prompt_active = (
+                handle.prompt is not None
+                and not handle.prompt_done.is_set()
+                and not handle.prompt_result_received
+                and not handle.cancel.is_set()
+            )
+            if prompt_active:
+                handle.eof_error_emitted = True
+                await handle.event_queue.put(
+                    BackendEvent(
+                        type="error",
+                        data={
+                            "message": "ACP process ended before prompt completed",
+                            "code": "acp_dead",
+                        },
+                    )
+                )
+            # The prompt task emits the terminal sentinel after it has turned
+            # the RPC result/error into an end/error event.  This avoids EOF
+            # racing ahead of the prompt result on a short-lived ACP process.
+            if handle.prompt is None or handle.prompt_done.is_set():
+                await handle.event_queue.put(None)
 
     def _map_notification(
         self,

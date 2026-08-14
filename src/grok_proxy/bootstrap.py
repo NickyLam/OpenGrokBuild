@@ -86,6 +86,7 @@ def bootstrap_settings(
         source=source,
     )
     written = write_client_config_files(info, state_dir=state_dir)
+    install_ids = list(runtime.available) or [model_id]
 
     do_wb = _resolve_install_flag(install_workbuddy, "GROK_PROXY_INSTALL_WORKBUDDY")
     do_oc = _resolve_install_flag(install_opencode, "GROK_PROXY_INSTALL_OPENCODE")
@@ -94,15 +95,19 @@ def bootstrap_settings(
     wb_path = None
     if do_wb:
         # Remove stale entry that used invalid id "grok-build"
-        wb_path = install_workbuddy_model(info, remove_ids=["grok-build", "grok-build-plan"])
+        wb_path = install_workbuddy_model(
+            info,
+            model_ids=install_ids,
+            remove_ids=["grok-build", "grok-build-plan"],
+        )
 
     oc_path = None
     if do_oc:
-        oc_path = install_opencode_model(info)
+        oc_path = install_opencode_model(info, model_ids=install_ids)
 
     pi_path = None
     if do_pi:
-        pi_path = install_pi_agent_model(info)
+        pi_path = install_pi_agent_model(info, model_ids=install_ids)
 
     banner = format_startup_banner(
         info,

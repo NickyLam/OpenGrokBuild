@@ -459,9 +459,10 @@ class ResponseOrchestrator:
             text_parts: list[str] = []
             usage: dict[str, Any] | None = None
             end_data: dict[str, Any] = {}
+            saw_end = False
 
             async def _consume() -> None:
-                nonlocal usage, end_data
+                nonlocal usage, end_data, saw_end
                 async for be in self.backend.events(session):
                     if live.cancel_event.is_set():
                         break
@@ -473,6 +474,7 @@ class ResponseOrchestrator:
                     if be.type == "usage" and isinstance(be.data.get("usage"), dict):
                         usage = be.data["usage"]
                     if be.type == "end":
+                        saw_end = True
                         end_data = be.data
                         if be.data.get("text") and not text_parts:
                             text_parts.append(str(be.data["text"]))
@@ -529,6 +531,12 @@ class ResponseOrchestrator:
                 ResponseStatus.COMPLETED.value,
             }:
                 return
+            if not saw_end:
+                raise ProxyError(
+                    "backend ended without a final event",
+                    status_code=502,
+                    code="backend_no_final_event",
+                )
 
             final_text = "".join(text_parts) or str(end_data.get("text") or "")
             record.text = final_text

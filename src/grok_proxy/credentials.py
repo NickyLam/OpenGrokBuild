@@ -353,18 +353,49 @@ def _load_json_file(path: Path) -> object | None:
         return None
 
 
+def _normalize_install_model_ids(
+    info: StoredCredentials,
+    model_ids: list[str] | None,
+) -> list[str]:
+    """Default model first, then the rest of the discovered list (deduped)."""
+    wanted: list[str] = []
+    for mid in model_ids or []:
+        mid = (mid or "").strip()
+        if mid and mid not in wanted:
+            wanted.append(mid)
+    default = (info.model_id or "").strip()
+    if default and default not in wanted:
+        wanted.insert(0, default)
+    elif default and default in wanted:
+        wanted = [default] + [m for m in wanted if m != default]
+    return wanted
+
+
+def _upsert_workbuddy_entry(entries: list[dict], entry: dict) -> str:
+    mid = entry.get("id")
+    for i, existing in enumerate(entries):
+        if existing.get("id") == mid or existing.get("name") == mid:
+            entries[i] = {**existing, **entry}
+            return "Updated"
+    entries.append(entry)
+    return "Added"
+
+
 def install_workbuddy_model(
     info: StoredCredentials,
     *,
     models_path: Path | None = None,
     remove_ids: list[str] | None = None,
+    model_ids: list[str] | None = None,
 ) -> Path | None:
     """
-    Upsert this proxy as a Custom model in WorkBuddy models.json.
+    Upsert this proxy's Custom model(s) in WorkBuddy models.json.
     Returns path written, or None if WorkBuddy dir does not exist.
 
+    model_ids: all Grok ids to advertise (default: ``info.model_id`` only).
     remove_ids: drop stale entries (e.g. old invalid "grok-build" id).
-    Existing unrelated models are always preserved.
+    Existing unrelated models are always preserved. Entries that share this
+    proxy URL but have a different id are kept (so 4.5 and 4.6 can coexist).
     """
     path = models_path or workbuddy_models_path()
     if not path.parent.is_dir():
@@ -382,7 +413,6 @@ def install_workbuddy_model(
         entries = [e for e in raw if isinstance(e, dict)]
 
     drop = set(remove_ids or [])
-    # Also drop prior proxy entries that pointed at our base_url but wrong id
     if drop:
         entries = [
             e
@@ -390,30 +420,18 @@ def install_workbuddy_model(
             if e.get("id") not in drop and e.get("name") not in drop
         ]
 
-    entry = workbuddy_model_entry(
-        api_key=info.api_key, base_url=info.base_url, model_id=info.model_id
-    )
-
-    replaced = False
-    for i, e in enumerate(entries):
-        same_id = e.get("id") == info.model_id or e.get("name") == info.model_id
-        url = e.get("url")
-        same_proxy = (
-            isinstance(url, str)
-            and url.rstrip("/") == info.base_url.rstrip("/")
-            and e.get("vendor") == "Custom"
+    wanted = _normalize_install_model_ids(info, model_ids)
+    actions: list[str] = []
+    for mid in wanted:
+        entry = workbuddy_model_entry(
+            api_key=info.api_key, base_url=info.base_url, model_id=mid
         )
-        if same_id or same_proxy:
-            entries[i] = {**e, **entry}
-            replaced = True
-            break
-    if not replaced:
-        entries.append(entry)
+        actions.append(f"{_upsert_workbuddy_entry(entries, entry)} {mid}")
 
     _backup_json(path)
     path.write_text(json.dumps(entries, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     _chmod_private(path)
-    logger.info("%s WorkBuddy model %r in %s", "Updated" if replaced else "Added", info.model_id, path)
+    logger.info("WorkBuddy models in %s: %s", path, ", ".join(actions) or "(none)")
     return path
 
 
@@ -423,30 +441,18 @@ def install_opencode_model(
     config_path: Path | None = None,
     provider_id: str = OPENCODE_PROVIDER_ID,
     create_dirs: bool = True,
+    model_ids: list[str] | None = None,
 ) -> Path | None:
     """
-    Upsert provider ``grok-proxy`` + model into OpenCode user config.
+    Upsert provider ``grok-proxy`` + model(s) into OpenCode user config.
 
     Merges into existing ``opencode.json``: other providers, models, and top-level
     keys (including ``model`` default selection) are preserved. Only our
-    provider entry and the target model id are inserted/updated.
+    provider entry and the given model ids are inserted/updated.
     """
     path = config_path or opencode_config_path()
     if not _ensure_parent_dir(path, label="OpenCode", create=create_dirs):
         return None
-
-    caps = get_model_capabilities(info.model_id)
-    fragment = generic_client_config(
-        api_key=info.api_key,
-        base_url=info.base_url,
-        model_id=info.model_id,
-        caps=caps,
-    )["opencode"]
-    model_entry = {
-        "name": fragment["name"],
-        "limit": fragment["limit"],
-        "modalities": fragment["modalities"],
-    }
 
     data: dict = {}
     raw = _load_json_file(path)
@@ -473,13 +479,28 @@ def install_opencode_model(
     else:
         models = dict(models)
 
-    prev = models.get(info.model_id)
-    if isinstance(prev, dict):
-        models[info.model_id] = {**prev, **model_entry}
-        action = "Updated"
-    else:
-        models[info.model_id] = model_entry
-        action = "Added"
+    wanted = _normalize_install_model_ids(info, model_ids)
+    actions: list[str] = []
+    for mid in wanted:
+        caps = get_model_capabilities(mid)
+        fragment = generic_client_config(
+            api_key=info.api_key,
+            base_url=info.base_url,
+            model_id=mid,
+            caps=caps,
+        )["opencode"]
+        model_entry = {
+            "name": fragment["name"],
+            "limit": fragment["limit"],
+            "modalities": fragment["modalities"],
+        }
+        prev = models.get(mid)
+        if isinstance(prev, dict):
+            models[mid] = {**prev, **model_entry}
+            actions.append(f"Updated {mid}")
+        else:
+            models[mid] = model_entry
+            actions.append(f"Added {mid}")
 
     options = existing.get("options")
     if not isinstance(options, dict):
@@ -505,11 +526,10 @@ def install_opencode_model(
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     _chmod_private(path)
     logger.info(
-        "%s OpenCode model %s/%s in %s",
-        action,
+        "OpenCode models %s/* in %s: %s",
         provider_id,
-        info.model_id,
         path,
+        ", ".join(actions) or "(none)",
     )
     return path
 
@@ -520,24 +540,17 @@ def install_pi_agent_model(
     models_path: Path | None = None,
     provider_id: str = PI_AGENT_PROVIDER_ID,
     create_dirs: bool = True,
+    model_ids: list[str] | None = None,
 ) -> Path | None:
     """
-    Upsert provider ``grok-proxy`` + model into Pi Agent models.json.
+    Upsert provider ``grok-proxy`` + model(s) into Pi Agent models.json.
 
     Merges into existing config: other providers and models are preserved.
-    Only our provider fields and the model with matching ``id`` are upserted.
+    Only our provider fields and models with matching ``id`` are upserted.
     """
     path = models_path or pi_agent_models_path()
     if not _ensure_parent_dir(path, label="Pi Agent", create=create_dirs):
         return None
-
-    caps = get_model_capabilities(info.model_id)
-    model_entry = generic_client_config(
-        api_key=info.api_key,
-        base_url=info.base_url,
-        model_id=info.model_id,
-        caps=caps,
-    )["pi_agent"]
 
     data: dict = {}
     raw = _load_json_file(path)
@@ -563,14 +576,25 @@ def install_pi_agent_model(
     if isinstance(models_raw, list):
         models = [m for m in models_raw if isinstance(m, dict)]
 
-    replaced = False
-    for i, m in enumerate(models):
-        if m.get("id") == info.model_id:
-            models[i] = {**m, **model_entry}
-            replaced = True
-            break
-    if not replaced:
-        models.append(dict(model_entry))
+    wanted = _normalize_install_model_ids(info, model_ids)
+    actions: list[str] = []
+    for mid in wanted:
+        caps = get_model_capabilities(mid)
+        model_entry = generic_client_config(
+            api_key=info.api_key,
+            base_url=info.base_url,
+            model_id=mid,
+            caps=caps,
+        )["pi_agent"]
+        replaced = False
+        for i, m in enumerate(models):
+            if m.get("id") == mid:
+                models[i] = {**m, **model_entry}
+                replaced = True
+                break
+        if not replaced:
+            models.append(dict(model_entry))
+        actions.append(f"{'Updated' if replaced else 'Added'} {mid}")
 
     compat = existing.get("compat")
     if not isinstance(compat, dict):
@@ -590,11 +614,10 @@ def install_pi_agent_model(
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     _chmod_private(path)
     logger.info(
-        "%s Pi Agent model %s/%s in %s",
-        "Updated" if replaced else "Added",
+        "Pi Agent models %s/* in %s: %s",
         provider_id,
-        info.model_id,
         path,
+        ", ".join(actions) or "(none)",
     )
     return path
 

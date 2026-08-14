@@ -37,9 +37,9 @@ else
 fi
 
 if [[ "${E2E_LIVE_PROMPT:-0}" == "1" ]]; then
-  payload=$(python3 -c 'import json,os; print(json.dumps({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"grok_consult","arguments":{"prompt":"Reply with exactly the word pong","cwd":os.environ.get("E2E_CWD") or os.getcwd()}}}))')
+  payload=$(python3 -c 'import json,os; print(json.dumps({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"grok_consult","arguments":{"prompt":"Reply with exactly the word pong","cwd":os.environ.get("E2E_CWD") or os.getcwd(),"background":False}}}))')
   out=$(printf '%s\n' "$payload" | uv run grok-proxy --mcp-stdio --database-path "${TMPDIR:-/tmp}/grok-proxy-e2e-mcp.db" 2>/dev/null | head -n 1 || true)
-  if echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "error" not in d or d.get("result")' 2>/dev/null; then
+  if echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "result" in d; p=json.loads(d["result"]["content"][0]["text"]); assert p.get("status")=="completed"' 2>/dev/null; then
     ok "tools/call grok_consult (live)"
     echo "  body: ${out:0:240}"
   else

@@ -58,9 +58,9 @@ Install flags merge into:
 
 | Flag | Target | Behavior |
 |------|--------|----------|
-| `--install-workbuddy` | `~/.workbuddy/models.json` | Upsert Custom model; keep others |
-| `--install-opencode` | `~/.config/opencode/opencode.json` | Upsert `provider.grok-proxy` + model; keep other providers/models |
-| `--install-pi-agent` | `~/.pi/agent/models.json` | Upsert `providers.grok-proxy` + model; keep other providers/models |
+| `--install-workbuddy` | `~/.workbuddy/models.json` | Upsert every discovered Grok model as Custom; keep others |
+| `--install-opencode` | `~/.config/opencode/opencode.json` | Upsert `provider.grok-proxy` + every discovered model; keep other providers/models |
+| `--install-pi-agent` | `~/.pi/agent/models.json` | Upsert `providers.grok-proxy` + every discovered model; keep other providers/models |
 
 ### First request
 
@@ -250,6 +250,10 @@ uv run grok-proxy --mcp-stdio
 
 Tools: `grok_consult`, `grok_review`, `grok_delegate`, `grok_status`, `grok_cancel`, `grok_get_diff`, `grok_resume`.
 
+`grok_consult` and `grok_review` run in the background by default and return a
+`response_id` immediately; poll with `grok_status`, or pass `background: false`
+to wait for one call to finish.
+
 </details>
 
 ---
@@ -289,11 +293,11 @@ export GROK_PROXY_API_KEY="$(cat ~/.grok-proxy/api_key)"
 uv run grok-proxy --install-workbuddy   # upserts ~/.workbuddy/models.json and starts the gateway
 ```
 
-Writes a Custom model entry with **image input**, **reasoning**, and **context window** from the Grok models cache (e.g. `maxInputTokens: 500000` for `grok-4.5`). See `~/.grok-proxy/workbuddy-model.json`.
+Writes one Custom entry **per discovered Grok model** (`grok models` / `models_cache.json`), with **image input**, **reasoning**, and **context window** from the Grok models cache when available. Default model is listed first. See `~/.grok-proxy/workbuddy-model.json` for the default-entry shape.
 
-Or add a Custom model from that file:
+Or add Custom models from that file:
 **url** = `http://127.0.0.1:8787/v1`, **apiKey** = contents of `~/.grok-proxy/api_key`,
-**id** = `grok-4.5` (a real id from `grok models`, not the legacy alias `grok-build`).
+**id** = each real id from `grok models` (e.g. `grok-4.6` and `grok-4.5`, not the legacy alias `grok-build`).
 Restart / refresh WorkBuddy models afterwards.
 
 </details>

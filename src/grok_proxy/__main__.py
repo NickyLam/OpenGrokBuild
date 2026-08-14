@@ -31,7 +31,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--install-workbuddy",
         action="store_true",
-        help="Upsert this proxy into ~/.workbuddy/models.json (Custom model; keeps other models)",
+        help="Upsert all discovered Grok models into ~/.workbuddy/models.json (keeps other models)",
     )
     p.add_argument(
         "--no-install-workbuddy",
@@ -41,7 +41,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--install-opencode",
         action="store_true",
-        help="Upsert provider/model into ~/.config/opencode/opencode.json (keeps other providers)",
+        help="Upsert provider + all discovered Grok models into ~/.config/opencode/opencode.json",
     )
     p.add_argument(
         "--no-install-opencode",
@@ -51,7 +51,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--install-pi-agent",
         action="store_true",
-        help="Upsert provider/model into ~/.pi/agent/models.json (keeps other providers)",
+        help="Upsert provider + all discovered Grok models into ~/.pi/agent/models.json",
     )
     p.add_argument(
         "--no-install-pi-agent",

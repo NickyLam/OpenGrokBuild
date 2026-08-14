@@ -147,6 +147,55 @@ def test_install_workbuddy_upsert(tmp_path: Path):
     assert entry2["apiKey"] == "sk-gp-new"
 
 
+def test_install_workbuddy_all_discovered_models(tmp_path: Path):
+    models = tmp_path / "models.json"
+    models.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "other",
+                    "name": "other",
+                    "vendor": "Custom",
+                    "url": "http://x/v1",
+                    "apiKey": "k",
+                },
+                {
+                    "id": "grok-4.5",
+                    "name": "grok-4.5",
+                    "vendor": "Custom",
+                    "url": "http://127.0.0.1:8787/v1",
+                    "apiKey": "old",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    info = build_connection_info(
+        api_key="sk-gp-abc",
+        host="127.0.0.1",
+        port=8787,
+        model_id="grok-4.6",
+        source="generated",
+    )
+    install_workbuddy_model(
+        info,
+        models_path=models,
+        model_ids=["grok-4.6", "grok-4.5"],
+        remove_ids=["grok-build", "grok-build-plan"],
+    )
+    data = json.loads(models.read_text())
+    ids = [e["id"] for e in data]
+    assert "other" in ids
+    assert "grok-4.6" in ids
+    assert "grok-4.5" in ids
+    assert len(data) == 3
+    forty_five = next(e for e in data if e["id"] == "grok-4.5")
+    forty_six = next(e for e in data if e["id"] == "grok-4.6")
+    assert forty_five["apiKey"] == "sk-gp-abc"
+    assert forty_six["apiKey"] == "sk-gp-abc"
+    assert forty_five["url"] == forty_six["url"] == "http://127.0.0.1:8787/v1"
+
+
 def test_install_opencode_merges_without_wiping(tmp_path: Path):
     cfg = tmp_path / "opencode.json"
     cfg.write_text(
@@ -209,6 +258,23 @@ def test_install_opencode_merges_without_wiping(tmp_path: Path):
     install_opencode_model(info, config_path=cfg)
     data2 = json.loads(cfg.read_text())
     assert set(data2["provider"][OPENCODE_PROVIDER_ID]["models"]) == {"keep-me", "grok-4.5"}
+
+
+def test_install_opencode_all_discovered_models(tmp_path: Path):
+    cfg = tmp_path / "opencode.json"
+    info = build_connection_info(
+        api_key="sk-gp-oc",
+        host="127.0.0.1",
+        port=8787,
+        model_id="grok-4.6",
+        source="generated",
+    )
+    install_opencode_model(info, config_path=cfg, model_ids=["grok-4.6", "grok-4.5"])
+    data = json.loads(cfg.read_text())
+    models = data["provider"][OPENCODE_PROVIDER_ID]["models"]
+    assert set(models) == {"grok-4.6", "grok-4.5"}
+    assert "limit" in models["grok-4.6"]
+    assert "limit" in models["grok-4.5"]
 
 
 def test_install_opencode_creates_file_when_missing(tmp_path: Path):
@@ -287,6 +353,21 @@ def test_install_pi_agent_merges_without_wiping(tmp_path: Path):
     assert len(data2["providers"][PI_AGENT_PROVIDER_ID]["models"]) == 2
 
 
+def test_install_pi_agent_all_discovered_models(tmp_path: Path):
+    models = tmp_path / "models.json"
+    info = build_connection_info(
+        api_key="sk-gp-pi",
+        host="127.0.0.1",
+        port=8787,
+        model_id="grok-4.6",
+        source="generated",
+    )
+    install_pi_agent_model(info, models_path=models, model_ids=["grok-4.6", "grok-4.5"])
+    data = json.loads(models.read_text())
+    ids = [m["id"] for m in data["providers"][PI_AGENT_PROVIDER_ID]["models"]]
+    assert ids == ["grok-4.6", "grok-4.5"]
+
+
 def test_install_pi_agent_creates_file_when_missing(tmp_path: Path):
     models = tmp_path / "agent" / "models.json"
     info = build_connection_info(
@@ -330,7 +411,14 @@ def test_bootstrap_settings(tmp_path: Path, monkeypatch):
     grok_home = tmp_path / "grokhome"
     grok_home.mkdir()
     (grok_home / "models_cache.json").write_text(
-        json.dumps({"models": {"grok-4.5": {"info": {"id": "grok-4.5"}}}}),
+        json.dumps(
+            {
+                "models": {
+                    "grok-4.6": {"info": {"id": "grok-4.6"}},
+                    "grok-4.5": {"info": {"id": "grok-4.5"}},
+                }
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv("GROK_HOME", str(grok_home))
@@ -346,10 +434,50 @@ def test_bootstrap_settings(tmp_path: Path, monkeypatch):
     assert result.settings.api_key.startswith(API_KEY_PREFIX)
     assert load_persisted_api_key(tmp_path) == result.settings.api_key
     assert (tmp_path / "workbuddy-model.json").is_file()
-    assert result.settings.default_model == "grok-4.5"
+    assert result.settings.default_model == "grok-4.6"
+    assert result.runtime_models.available == ["grok-4.6", "grok-4.5"]
     assert result.opencode_path is None
     assert result.pi_agent_path is None
     wb = json.loads((tmp_path / "workbuddy-model.json").read_text())
-    assert wb["id"] == "grok-4.5"
+    assert wb["id"] == "grok-4.6"
     assert wb["supportsImages"] is True
     assert wb["maxInputTokens"] >= 128_000
+
+
+def test_bootstrap_installs_all_workbuddy_models(tmp_path: Path, monkeypatch):
+    clear_settings_cache()
+    monkeypatch.delenv("GROK_PROXY_API_KEY", raising=False)
+    grok_home = tmp_path / "grokhome"
+    grok_home.mkdir()
+    (grok_home / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": {
+                    "grok-4.6": {"info": {"id": "grok-4.6"}},
+                    "grok-4.5": {"info": {"id": "grok-4.5"}},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GROK_HOME", str(grok_home))
+    wb_dir = tmp_path / "workbuddy"
+    wb_dir.mkdir()
+    models_path = wb_dir / "models.json"
+    models_path.write_text("[]\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "grok_proxy.credentials.workbuddy_models_path",
+        lambda: models_path,
+    )
+    s = Settings(api_key="", host="127.0.0.1", port=8787, default_model="auto", models="")
+    result = bootstrap_settings(
+        s,
+        install_workbuddy=True,
+        install_opencode=False,
+        install_pi_agent=False,
+        state_dir=tmp_path,
+        print_banner=False,
+    )
+    assert result.workbuddy_path == models_path
+    data = json.loads(models_path.read_text())
+    assert {e["id"] for e in data} == {"grok-4.6", "grok-4.5"}

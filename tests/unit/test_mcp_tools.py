@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from grok_proxy.backends.base import BackendEvent
@@ -34,11 +36,17 @@ async def test_mcp_consult_and_status(tmp_path):
         "grok_consult",
         {"prompt": "analyze", "cwd": str(tmp_path)},
     )
-    assert result.get("status") == "completed" or result.get("x_grok", {}).get("text") == "review ok"
-    rid = result.get("id") or result.get("response_id")
-    if not rid and "response" in result:
-        rid = result["response"]["id"]
-    assert rid
-    status = await router.call_tool("grok_status", {"response_id": rid})
+    assert result["status"] == "queued"
+    assert result["response_id"]
+    rid = result["response_id"]
+
+    status = result["response"]
+    for _ in range(100):
+        status = await router.call_tool("grok_status", {"response_id": rid})
+        if status["status"] == "completed":
+            break
+        await asyncio.sleep(0.01)
     assert status["id"] == rid
+    assert status["status"] == "completed"
+    assert status["x_grok"]["text"] == "review ok"
     db.close()

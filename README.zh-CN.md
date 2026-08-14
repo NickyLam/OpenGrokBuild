@@ -58,9 +58,9 @@ uv run grok-proxy --install-pi-agent
 
 | 参数 | 目标 | 行为 |
 |------|------|------|
-| `--install-workbuddy` | `~/.workbuddy/models.json` | 插入/更新 Custom 模型，保留其它项 |
-| `--install-opencode` | `~/.config/opencode/opencode.json` | 插入/更新 `provider.grok-proxy` 与模型，保留其它 provider/模型 |
-| `--install-pi-agent` | `~/.pi/agent/models.json` | 插入/更新 `providers.grok-proxy` 与模型，保留其它 provider/模型 |
+| `--install-workbuddy` | `~/.workbuddy/models.json` | 为每个发现的 Grok 模型插入/更新 Custom 项，保留其它项 |
+| `--install-opencode` | `~/.config/opencode/opencode.json` | 插入/更新 `provider.grok-proxy` 与全部发现的模型，保留其它 provider/模型 |
+| `--install-pi-agent` | `~/.pi/agent/models.json` | 插入/更新 `providers.grok-proxy` 与全部发现的模型，保留其它 provider/模型 |
 
 ### 第一次请求
 
@@ -250,6 +250,9 @@ uv run grok-proxy --mcp-stdio
 
 工具：`grok_consult`、`grok_review`、`grok_delegate`、`grok_status`、`grok_cancel`、`grok_get_diff`、`grok_resume`。
 
+`grok_consult` 与 `grok_review` 默认后台执行，立即返回 `response_id`；用
+`grok_status` 查询结果，也可传 `background: false` 等待单次调用完成。
+
 </details>
 
 ---
@@ -289,11 +292,11 @@ export GROK_PROXY_API_KEY="$(cat ~/.grok-proxy/api_key)"
 uv run grok-proxy --install-workbuddy   # 写入 ~/.workbuddy/models.json 并启动网关
 ```
 
-会写入带 **图片输入**、**推理** 和 **上下文窗口** 的 Custom 模型项（数据来自 Grok models cache，例如 `grok-4.5` 的 `maxInputTokens: 500000`）。详见 `~/.grok-proxy/workbuddy-model.json`。
+会为 **每个发现的 Grok 模型**（`grok models` / `models_cache.json`）各写一条 Custom 项，带 **图片输入**、**推理** 和 **上下文窗口**（有 cache 时用 cache）。默认模型排在前面。条目形状见 `~/.grok-proxy/workbuddy-model.json`。
 
 或从该文件手动添加自定义模型：
 **url** = `http://127.0.0.1:8787/v1`，**apiKey** = `~/.grok-proxy/api_key` 内容，
-**id** = `grok-4.5`（来自 `grok models` 的真实 id，不是旧别名 `grok-build`）。
+**id** = `grok models` 里的每个真实 id（例如 `grok-4.6` 和 `grok-4.5`，不是旧别名 `grok-build`）。
 完成后重启 / 刷新 WorkBuddy 模型列表。
 
 </details>

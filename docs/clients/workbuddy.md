@@ -8,7 +8,7 @@ WorkBuddy can treat the proxy as an OpenAI-compatible chat model.
 uv run grok-proxy --install-workbuddy
 ```
 
-This upserts an entry into `~/.workbuddy/models.json` from `~/.grok-proxy/workbuddy-model.json`.
+This upserts **one Custom entry per discovered Grok model** into `~/.workbuddy/models.json`. The default model is listed first. Unrelated WorkBuddy models are kept. `~/.grok-proxy/workbuddy-model.json` is the default-entry shape for manual copy.
 
 The generated entry enables:
 
@@ -30,13 +30,13 @@ Re-run `--install-workbuddy` after upgrading the proxy so WorkBuddy picks up the
 |-------|--------|
 | **Base URL / url** | `http://127.0.0.1:8787/v1` |
 | **API Key** | `~/.grok-proxy/api_key` |
-| **Model ID** | real id from `grok models` (e.g. `grok-4.5`) |
+| **Model ID** | each real id from `grok models` (e.g. `grok-4.6`, `grok-4.5`) |
 
 3. In WorkBuddy → add **Custom** model:
    - Vendor: Custom
    - URL: Base URL above
    - API Key: proxy key
-   - Model id: **must** match CLI (`grok-4.5`), not the old alias `grok-build`
+   - Model id: **must** match a CLI id (`grok-4.6`, `grok-4.5`, …), not the old alias `grok-build`
 
 4. Optional flags in WorkBuddy (if the UI supports custom body):
    - Prefer sending `cwd` / `working_directory` to the project path

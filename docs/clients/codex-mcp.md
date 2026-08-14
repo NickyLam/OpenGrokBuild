@@ -14,8 +14,8 @@ Works with official MCP SDK clients (Codex, Qoder, CodeBuddy, Claude-style hosts
 
 | Tool | Default policy | Purpose |
 |------|----------------|---------|
-| `grok_consult` | read_only | Architecture / analysis |
-| `grok_review` | read_only | Code review |
+| `grok_consult` | read_only + background | Architecture / analysis; returns a `response_id` immediately by default |
+| `grok_review` | read_only + background | Code review; returns a `response_id` immediately by default |
 | `grok_delegate` | worktree + ask | Full coding task |
 | `grok_status` | — | Poll response |
 | `grok_cancel` | — | Cancel |
@@ -56,10 +56,16 @@ Then point Codex at that script as the MCP command.
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
   | uv run grok-proxy --mcp-stdio
 
-# consult (uses real Grok if authenticated — may cost tokens)
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"grok_consult","arguments":{"prompt":"Reply with pong only","cwd":"'"$PWD"'"}}}' \
+# one-shot consult (uses real Grok if authenticated — may cost tokens)
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"grok_consult","arguments":{"prompt":"Reply with pong only","cwd":"'"$PWD"'","background":false}}}' \
   | uv run grok-proxy --mcp-stdio
 ```
+
+`grok_consult` and `grok_review` default to `background: true`, so a tool call
+returns a `response_id` and the task can be followed with `grok_status`. Pass
+`"background": false` when a single request must wait for the final response.
+The stdio server continues handling other JSON-RPC requests while any tool call
+is running.
 
 Or use the script:
 
@@ -114,7 +120,7 @@ args: run --directory <repo> grok-proxy --mcp-stdio
 | Process exits immediately | Run `uv run grok-proxy --mcp-stdio` and send `tools/list` line |
 | Empty tool list | Ensure method name is `tools/list` or `list_tools` |
 | Grok not found | `which grok` / `GROK_BIN` |
-| Hang on delegate | Permission wait / long task — poll with `grok_status` or use HTTP events |
+| Hang on consult / review / delegate | Long task or permission wait — use the returned `response_id` with `grok_status` or `grok_cancel` |
 | Protocol mismatch | Official MCP SDK clients may need full SDK; use e2e_mcp.sh to confirm lite protocol |
 
 ## Relation to HTTP

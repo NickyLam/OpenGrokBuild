@@ -8,7 +8,12 @@ from typing import Any
 import pytest
 
 from grok_proxy.backends.acp import AcpBackend, _AcpHandle
-from grok_proxy.backends.base import BackendError, BackendEvent, BackendSessionRequest
+from grok_proxy.backends.base import (
+    BackendError,
+    BackendEvent,
+    BackendSession,
+    BackendSessionRequest,
+)
 
 
 def _make_handle(**kwargs: Any) -> _AcpHandle:
@@ -150,6 +155,26 @@ async def test_read_loop_eof_fails_pending_and_signals_end():
     assert exc_info.value.code == "acp_dead"
     assert not handle.pending
     assert _drain_queue(handle) == [None]
+
+
+@pytest.mark.asyncio
+async def test_events_report_acp_dead_when_prompt_eof_precedes_result():
+    backend = AcpBackend()
+    handle = _make_handle(prompt="hello")
+    _attach_fake_proc(handle, [])
+    session = BackendSession(
+        session_id="s1",
+        backend_name="acp",
+        cwd="/tmp",
+        model="grok-code",
+        handle=handle,
+    )
+
+    await backend._read_loop(handle)
+
+    event = await anext(backend.events(session))
+    assert event.type == "error"
+    assert event.data["code"] == "acp_dead"
 
 
 def test_map_notification_permission_request():
