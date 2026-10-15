@@ -18,6 +18,7 @@ Works with official MCP SDK clients (Codex, Qoder, CodeBuddy, Claude-style hosts
 | `grok_review` | read_only + background | Code review; returns a `response_id` immediately by default |
 | `grok_delegate` | worktree + ask | Full coding task |
 | `grok_status` | — | Poll response |
+| `grok_models` | — | Show the model snapshot; `refresh: true` forces discovery |
 | `grok_cancel` | — | Cancel |
 | `grok_get_diff` | — | Worktree diff |
 | `grok_resume` | — | Continue session |
@@ -34,8 +35,13 @@ Exact Codex config keys evolve; use the pattern below and adapt to your Codex ve
 command = "uv"
 args = ["run", "--directory", "/absolute/path/to/OpenGrokBuild", "grok-proxy", "--mcp-stdio"]
 # env if needed:
-# env = { GROK_BIN = "/Users/you/.grok/bin/grok", GROK_PROXY_BACKEND = "headless" }
+# env = { GROK_BIN = "/Users/you/.grok/bin/grok", GROK_PROXY_BACKEND = "acp", GROK_PROXY_DEFAULT_MODEL = "auto" }
 ```
+
+`GROK_PROXY_DEFAULT_MODEL=auto`（或省略该变量）会在 MCP 启动时优先执行
+`grok models`，再以有效缓存作为降级；固定写入某个真实模型 ID 则保留固定模式。
+模型清单会在进程启动时读取，并在默认 30 分钟 TTL 到期后按需刷新；修改
+配置后仍需重启 Codex 的 MCP 进程。
 
 **Option B — shell wrapper**
 
@@ -66,6 +72,13 @@ returns a `response_id` and the task can be followed with `grok_status`. Pass
 `"background": false` when a single request must wait for the final response.
 The stdio server continues handling other JSON-RPC requests while any tool call
 is running.
+
+To inspect or refresh the model list from Codex, call `grok_models` with an empty
+arguments object or with `{"refresh": true}`. The result includes the effective
+default model, source (`cli`, `cache`, `config`, or `fallback`), timestamps, and
+any last refresh error. Normal consult/review/delegate requests refresh an
+expired snapshot automatically; an explicit model on a request remains fixed
+for that response.
 
 Or use the script:
 
@@ -121,6 +134,7 @@ args: run --directory <repo> grok-proxy --mcp-stdio
 | Empty tool list | Ensure method name is `tools/list` or `list_tools` |
 | Grok not found | `which grok` / `GROK_BIN` |
 | Hang on consult / review / delegate | Long task or permission wait — use the returned `response_id` with `grok_status` or `grok_cancel` |
+| Model list is old | Call `grok_models` with `refresh=true`, or `GET /v1/models?refresh=true` |
 | Protocol mismatch | Official MCP SDK clients may need full SDK; use e2e_mcp.sh to confirm lite protocol |
 
 ## Relation to HTTP

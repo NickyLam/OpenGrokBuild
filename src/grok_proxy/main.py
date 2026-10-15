@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from grok_proxy import __version__
@@ -16,16 +16,20 @@ from grok_proxy.api.responses import build_responses_router
 from grok_proxy.api_keys import ApiKeyStore, get_or_create_pepper
 from grok_proxy.auth import authenticate_request, get_auth_context
 from grok_proxy.backends.acp import select_backend
-from grok_proxy.bootstrap import bootstrap_settings
+from grok_proxy.bootstrap import bootstrap_settings, resolve_model_settings
 from grok_proxy.concurrency import ConcurrencyGate, PerKeyConcurrencyTracker
 from grok_proxy.config import Settings, get_settings
 from grok_proxy.credentials import generic_client_config, workbuddy_model_entry
-from grok_proxy.model_resolve import get_model_capabilities
 from grok_proxy.errors import ProxyError, http_exception_handler, proxy_error_handler
 from grok_proxy.grok_runner import GrokResult, GrokRunner, map_usage
 from grok_proxy.mcp.server import McpToolRouter
 from grok_proxy.metrics import MetricsRegistry
-from grok_proxy.model_resolve import RuntimeModels, resolve_request_model, resolve_runtime_models
+from grok_proxy.model_resolve import (
+    RuntimeModelRegistry,
+    RuntimeModels,
+    get_model_capabilities,
+    resolve_request_model,
+)
 from grok_proxy.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -67,13 +71,17 @@ def create_app(
     install_pi_agent: bool | None = None,
     print_banner: bool = False,
     runtime_models: RuntimeModels | None = None,
+    model_registry: RuntimeModelRegistry | None = None,
     backend: Any | None = None,
     database_path: str | Path | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         cfg = settings if settings is not None else get_settings()
+        configured_default = cfg.default_model
+        configured_models = cfg.models
         models_rt = runtime_models
+        registry = model_registry
         if bootstrap:
             result = bootstrap_settings(
                 cfg,
@@ -84,20 +92,29 @@ def create_app(
             )
             cfg = result.settings
             models_rt = result.runtime_models
+            registry = result.model_registry
         elif not cfg.api_key.strip():
             cfg.require_api_key()
         cfg.validate_bind_safety()
         if models_rt is None:
-            models_rt = resolve_runtime_models(
-                configured_default=cfg.default_model,
-                configured_models=cfg.models,
+            models_rt = resolve_model_settings(cfg)
+        elif cfg.default_model in ("", "auto", "grok-build", "default"):
+            # Callers may provide a resolved snapshot while keeping the
+            # settings object in automatic mode.
+            cfg.default_model = models_rt.default_model
+            cfg.models = ",".join(models_rt.available)
+        if registry is None:
+            registry = RuntimeModelRegistry(
+                initial=models_rt,
+                configured_default=configured_default,
+                configured_models=configured_models,
                 grok_bin=cfg.grok_bin,
+                refresh_interval_sec=cfg.model_refresh_interval_sec,
             )
-            if cfg.default_model in ("", "auto", "grok-build", "default"):
-                cfg.default_model = models_rt.default_model
 
         app.state.settings = cfg
         app.state.runtime_models = models_rt
+        app.state.model_registry = registry
         app.state.gate = ConcurrencyGate(cfg.max_concurrent)
         app.state.per_key_gate = PerKeyConcurrencyTracker()
         app.state.process_manager = ProcessManager()
@@ -149,6 +166,8 @@ def create_app(
         app.state.mcp = McpToolRouter(
             app.state.orchestrator,
             default_model=cfg.default_model,
+            available_models=models_rt.available,
+            model_registry=registry,
         )
 
         backend_name = getattr(
@@ -205,6 +224,9 @@ def create_app(
     def health_payload(request: Request) -> dict[str, Any]:
         gate: ConcurrencyGate = request.app.state.gate
         cfg: Settings = request.app.state.settings
+        registry: RuntimeModelRegistry | None = getattr(request.app.state, "model_registry", None)
+        model_snapshot = registry.snapshot() if registry is not None else None
+        runtime_model = model_snapshot.runtime if model_snapshot is not None else None
         host = cfg.host if cfg.host not in ("0.0.0.0", "::") else "127.0.0.1"
         backend = getattr(request.app.state, "backend", None)
         backend_name = getattr(getattr(backend, "capabilities", None), "name", None)
@@ -213,9 +235,11 @@ def create_app(
             "version": __version__,
             "in_flight": gate.in_flight,
             "max_concurrent": gate.limit,
-            "default_model": cfg.default_model,
+            "default_model": runtime_model.default_model if runtime_model else cfg.default_model,
             "base_url": f"http://{host}:{cfg.port}/v1",
-            "model_id": cfg.default_model,
+            "model_id": runtime_model.default_model if runtime_model else cfg.default_model,
+            "model_source": runtime_model.source if runtime_model else "config",
+            "model_stale": model_snapshot.stale if model_snapshot is not None else False,
             "backend": backend_name,
         }
 
@@ -303,19 +327,22 @@ def create_app(
             )
         host = cfg.host if cfg.host not in ("0.0.0.0", "::") else "127.0.0.1"
         base_url = f"http://{host}:{cfg.port}/v1"
-        caps = get_model_capabilities(cfg.default_model)
+        registry: RuntimeModelRegistry | None = getattr(request.app.state, "model_registry", None)
+        runtime = (await registry.get()).runtime if registry is not None else request.app.state.runtime_models
+        model_id = runtime.default_model
+        caps = get_model_capabilities(model_id)
         client = generic_client_config(
             api_key=cfg.api_key,
             base_url=base_url,
-            model_id=cfg.default_model,
+            model_id=model_id,
             caps=caps,
         )
         return {
             "base_url": base_url,
             "api_key": cfg.api_key,
-            "model_id": cfg.default_model,
-            "model": cfg.default_model,
-            "models": cfg.model_ids(),
+            "model_id": model_id,
+            "model": model_id,
+            "models": runtime.available or cfg.model_ids(),
             "context_window": caps.context_window,
             "max_output_tokens": caps.max_output_tokens,
             "supports_images": caps.supports_images,
@@ -323,14 +350,14 @@ def create_app(
             "workbuddy": workbuddy_model_entry(
                 api_key=cfg.api_key,
                 base_url=base_url,
-                model_id=cfg.default_model,
+                model_id=model_id,
                 caps=caps,
             ),
             "client_config": client,
             "openai_sdk": {
                 "base_url": base_url,
                 "api_key": cfg.api_key,
-                "model": cfg.default_model,
+                "model": model_id,
             },
             "pi_agent": client["pi_agent"],
             "opencode": client["opencode"],
@@ -339,10 +366,22 @@ def create_app(
     @app.get("/v1/models", response_model=ModelList)
     async def list_models(
         request: Request,
+        response: Response,
         _: None = Depends(require_auth),
         cfg: Settings = Depends(get_cfg),
+        refresh: bool = False,
     ) -> ModelList:
-        runtime: RuntimeModels = request.app.state.runtime_models
+        registry: RuntimeModelRegistry | None = getattr(request.app.state, "model_registry", None)
+        if registry is not None:
+            snapshot = await registry.get(refresh=refresh)
+            runtime = snapshot.runtime
+            response.headers["X-Grok-Model-Source"] = runtime.source
+            response.headers["X-Grok-Model-Default"] = runtime.default_model
+            response.headers["X-Grok-Model-Stale"] = str(snapshot.stale).lower()
+            if snapshot.last_success_at is not None:
+                response.headers["X-Grok-Model-Last-Success"] = str(snapshot.last_success_at)
+        else:
+            runtime = request.app.state.runtime_models
         ids = runtime.available or cfg.model_ids()
         return ModelList(
             data=[ModelCard(id=mid, created=0) for mid in ids],
@@ -499,7 +538,8 @@ def create_app(
         auth.require_scopes(Scope.RESPONSE_CREATE.value)
 
         sessions: SessionStore = request.app.state.sessions
-        runtime: RuntimeModels = request.app.state.runtime_models
+        registry: RuntimeModelRegistry | None = getattr(request.app.state, "model_registry", None)
+        runtime = (await registry.get()).runtime if registry is not None else request.app.state.runtime_models
         orch: ResponseOrchestrator = request.app.state.orchestrator
         metrics: MetricsRegistry = request.app.state.metrics
 
@@ -510,7 +550,9 @@ def create_app(
 
         prompt, sys_rules = build_prompt(body.messages, session_id=body.session_id)
         rules = _merge_rules(sys_rules, body.rules)
-        model = resolve_request_model(body.model or cfg.default_model, runtime)
+        # Omitted model follows the registry snapshot. Settings.default_model is
+        # the id materialized at startup and would ignore a later catalog refresh.
+        model = resolve_request_model(body.model, runtime)
 
         logger.info(
             "chat.completions model=%s requested=%s cwd=%s stream=%s resume=%s prompt_chars=%s actor=%s",

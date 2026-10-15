@@ -69,6 +69,30 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 | 401 | Wrong API key | Reload key from `~/.grok-proxy/api_key` |
 | Empty reply | Grok auth missing | `grok login` or `XAI_API_KEY` |
 
+### Grok 4.7 exists in the list but CLI rejects it
+
+The proxy can discover 4.7 in `~/.grok/models_cache.json` while a new CLI
+process loads only its built-in 4.6/4.5 pair because the remote catalog fetch
+failed. Check `~/.grok/logs/unified.jsonl` for `model catalog refresh failed`.
+
+If a VPN resolves `cli-chat-proxy.grok.com` to a broken synthetic IP route,
+stop the existing gateway and start:
+
+```bash
+uv run grok-proxy --catalog-dns-bypass
+```
+
+This opt-in mode resolves the official catalog hostname with Google's HTTPS
+DNS service and uses a process-local HTTPS CONNECT tunnel. TLS still verifies
+the original Grok hostname; credentials and model traffic remain encrypted.
+It changes no system DNS, VPN settings, or global Grok configuration. Other
+HTTPS destinations use system DNS through this tunnel, so use this mode only
+where direct connections to those destinations are appropriate. An existing
+HTTPS proxy is replaced for this gateway process only. Public DNS is refreshed
+according to its TTL; no fixed upstream IP is stored.
+
+Verify a real 4.7 reply after starting; a successful `/v1/models` is not enough.
+
 ## Notes
 
 - Non-stream chat uses the orchestrator and returns `grok.response_id`.

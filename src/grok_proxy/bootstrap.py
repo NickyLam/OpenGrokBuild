@@ -16,7 +16,7 @@ from grok_proxy.credentials import (
     install_workbuddy_model,
     write_client_config_files,
 )
-from grok_proxy.model_resolve import RuntimeModels, resolve_runtime_models
+from grok_proxy.model_resolve import RuntimeModelRegistry, RuntimeModels, resolve_runtime_models
 
 logger = logging.getLogger("grok_proxy")
 
@@ -39,6 +39,30 @@ class BootstrapResult:
     opencode_path: Path | None
     pi_agent_path: Path | None
     runtime_models: RuntimeModels
+    model_registry: RuntimeModelRegistry
+
+
+def resolve_model_settings(settings: Settings, *, prefer_cli: bool = True) -> RuntimeModels:
+    """Resolve model ids and apply the result to a Settings instance.
+
+    Model discovery is deliberately independent from API-key creation so MCP
+    startup can refresh the model snapshot even when a key already exists.
+    """
+    runtime = resolve_runtime_models(
+        configured_default=settings.default_model,
+        configured_models=settings.models,
+        grok_bin=settings.grok_bin,
+        prefer_cli=prefer_cli,
+    )
+    settings.default_model = runtime.default_model
+    settings.models = ",".join(runtime.available)
+    logger.info(
+        "resolved Grok models default=%s models=%s source=%s",
+        runtime.default_model,
+        runtime.available,
+        runtime.source,
+    )
+    return runtime
 
 
 def bootstrap_settings(
@@ -59,17 +83,20 @@ def bootstrap_settings(
     """
     state_dir = state_dir or default_state_dir()
     cfg = settings if settings is not None else get_settings()
+    configured_default = cfg.default_model
+    configured_models = cfg.models
 
     key, source = ensure_api_key(cfg.api_key, state_dir=state_dir, persist=True)
     cfg.api_key = key
 
-    runtime = resolve_runtime_models(
-        configured_default=cfg.default_model,
-        configured_models=cfg.models,
+    runtime = resolve_model_settings(cfg)
+    model_registry = RuntimeModelRegistry(
+        initial=runtime,
+        configured_default=configured_default,
+        configured_models=configured_models,
         grok_bin=cfg.grok_bin,
+        refresh_interval_sec=cfg.model_refresh_interval_sec,
     )
-    cfg.default_model = runtime.default_model
-    cfg.models = ",".join(runtime.available)
 
     # Push into env so re-loaded Settings / uvicorn child import see it
     os.environ["GROK_PROXY_API_KEY"] = key
@@ -145,4 +172,5 @@ def bootstrap_settings(
         opencode_path=oc_path,
         pi_agent_path=pi_path,
         runtime_models=runtime,
+        model_registry=model_registry,
     )

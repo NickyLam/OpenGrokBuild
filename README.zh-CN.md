@@ -38,6 +38,10 @@ uv sync --all-extras
 # 首次启动会自动生成 API Key（~/.grok-proxy/）
 uv run grok-proxy
 
+# VPN 合成 DNS 导致 4.7 报 unknown model id 时（不改系统 DNS，保留 TLS 校验）：
+# uv run grok-proxy --catalog-dns-bypass
+# 详见 docs/clients/workbuddy.md
+
 # 可选：向客户端配置写入模型（仅 upsert，不会清空原有模型）
 uv run grok-proxy --install-workbuddy
 uv run grok-proxy --install-opencode
@@ -248,10 +252,11 @@ curl -s http://127.0.0.1:8787/v1/keys \
 uv run grok-proxy --mcp-stdio
 ```
 
-工具：`grok_consult`、`grok_review`、`grok_delegate`、`grok_status`、`grok_cancel`、`grok_get_diff`、`grok_resume`。
+工具：`grok_consult`、`grok_review`、`grok_delegate`、`grok_status`、`grok_models`、`grok_cancel`、`grok_get_diff`、`grok_resume`。
 
 `grok_consult` 与 `grok_review` 默认后台执行，立即返回 `response_id`；用
-`grok_status` 查询结果，也可传 `background: false` 等待单次调用完成。
+`grok_status` 查询结果，也可传 `background: false` 等待单次调用完成。使用
+`grok_models` 的 `{"refresh": true}` 可强制刷新模型清单；快照过期时会自动刷新。
 
 </details>
 
@@ -317,7 +322,7 @@ uv run grok-proxy --install-workbuddy   # 写入 ~/.workbuddy/models.json 并启
 }
 ```
 
-Qoder 会列出 7 个工具。`grok_consult` / `grok_review` 为只读；`grok_delegate` 默认在隔离 git worktree 中运行，且 `permission_policy=ask`。
+Qoder 会列出 8 个工具。`grok_consult` / `grok_review` 为只读；`grok_models` 用于查看或刷新运行时模型快照；`grok_delegate` 默认在隔离 git worktree 中运行，且 `permission_policy=ask`。
 
 </details>
 

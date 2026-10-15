@@ -97,3 +97,6 @@ ehthumbs.db
 # --- Project process / planning docs (local only) ---
 Grok-Build-Cli-Proxy-方案B任务清单.md
 Grok-Build-Cli-Proxy-方案B完整优化方案.md
+
+# --- Local agent session data ---
+.workbuddy/

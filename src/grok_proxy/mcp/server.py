@@ -6,6 +6,13 @@ import sys
 from typing import Any
 
 from grok_proxy import __version__
+from grok_proxy.model_resolve import (
+    MODEL_ALIASES,
+    ModelSnapshot,
+    RuntimeModelRegistry,
+    RuntimeModels,
+    resolve_request_model,
+)
 from grok_proxy.protocol.responses_models import response_record_to_object
 from grok_proxy.runtime.commands import CreateResponseCommand, GrokExtensions
 from grok_proxy.runtime.orchestrator import ResponseOrchestrator
@@ -17,9 +24,47 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 class McpToolRouter:
     """MCP tool surface over ResponseOrchestrator (stdio JSON-RPC lite)."""
 
-    def __init__(self, orchestrator: ResponseOrchestrator, *, default_model: str) -> None:
+    def __init__(
+        self,
+        orchestrator: ResponseOrchestrator,
+        *,
+        default_model: str,
+        available_models: list[str] | None = None,
+        model_registry: RuntimeModelRegistry | None = None,
+    ) -> None:
         self.orchestrator = orchestrator
+        available = list(available_models or [default_model])
+        if default_model in MODEL_ALIASES and available:
+            default_model = available[0]
         self.default_model = default_model
+        self.runtime_models = RuntimeModels(
+            default_model=default_model,
+            available=available,
+            source="config",
+        )
+        self.model_registry = model_registry
+
+    async def _runtime(self, *, refresh: bool = False) -> RuntimeModels:
+        if self.model_registry is not None:
+            snapshot = await self.model_registry.get(refresh=refresh)
+            self.runtime_models = snapshot.runtime
+            self.default_model = snapshot.runtime.default_model
+        return self.runtime_models
+
+    async def _resolve_model(self, requested: Any) -> str:
+        runtime = await self._runtime()
+        return resolve_request_model(
+            str(requested) if requested is not None else None,
+            runtime,
+        )
+
+    async def _models_payload(self, *, refresh: bool = False) -> dict[str, object]:
+        if self.model_registry is not None:
+            snapshot = await self.model_registry.get(refresh=refresh)
+            self.runtime_models = snapshot.runtime
+            self.default_model = snapshot.runtime.default_model
+            return snapshot.as_dict()
+        return ModelSnapshot(runtime=self.runtime_models).as_dict()
 
     def list_tools(self) -> list[dict[str, Any]]:
         return [
@@ -85,6 +130,17 @@ class McpToolRouter:
                 },
             },
             {
+                "name": "grok_models",
+                "description": (
+                    "Show the current Grok model snapshot. Set refresh=true to force "
+                    "a model discovery attempt."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"refresh": {"type": "boolean", "default": False}},
+                },
+            },
+            {
                 "name": "grok_cancel",
                 "description": "Cancel a response.",
                 "inputSchema": {
@@ -121,7 +177,7 @@ class McpToolRouter:
             return await self._create(
                 prompt=str(arguments["prompt"]),
                 cwd=str(arguments["cwd"]),
-                model=str(arguments.get("model") or self.default_model),
+                model=await self._resolve_model(arguments.get("model")),
                 workspace_mode="read_only",
                 permission_policy="server",
                 max_turns=arguments.get("max_turns"),
@@ -135,7 +191,7 @@ class McpToolRouter:
             return await self._create(
                 prompt=prompt,
                 cwd=str(arguments["cwd"]),
-                model=str(arguments.get("model") or self.default_model),
+                model=await self._resolve_model(arguments.get("model")),
                 workspace_mode="read_only",
                 permission_policy="server",
                 background=bool(arguments.get("background", True)),
@@ -146,7 +202,7 @@ class McpToolRouter:
             return await self._create(
                 prompt=str(arguments["prompt"]),
                 cwd=str(arguments["cwd"]),
-                model=str(arguments.get("model") or self.default_model),
+                model=await self._resolve_model(arguments.get("model")),
                 workspace_mode=str(arguments.get("workspace_mode") or "worktree"),
                 permission_policy=str(arguments.get("permission_policy") or "ask"),
                 background=background,
@@ -155,6 +211,8 @@ class McpToolRouter:
         if name == "grok_status":
             rec = self.orchestrator.get(str(arguments["response_id"]))
             return response_record_to_object(rec).model_dump()
+        if name == "grok_models":
+            return await self._models_payload(refresh=bool(arguments.get("refresh", False)))
         if name == "grok_cancel":
             rec = await self.orchestrator.cancel(str(arguments["response_id"]), actor="mcp")
             return response_record_to_object(rec).model_dump()

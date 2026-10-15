@@ -4,17 +4,45 @@ import asyncio
 import json
 import logging
 import os
+import random
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from grok_proxy.cli_env import apply_grok_cli_env
 from grok_proxy.errors import ProxyError
 from grok_proxy.runtime.process_manager import terminate_process_tree
 
 # optional ProcessManager instance without hard circular import at type-check time
 
 logger = logging.getLogger(__name__)
+
+# A headless `grok -m grok-4.7` exits with this error when that process's
+# in-memory catalog is still the built-in pair. The CLI schedules its own
+# catalog retry, then exits before the retry runs. One new process is enough
+# when the on-disk cache is loadable or the next prefetch finishes in time.
+CATALOG_MISS_RETRIES = 1
+
+
+def is_unloaded_catalog_model_error(event: dict[str, Any]) -> bool:
+    """True for the CLI's startup rejection of a catalog id such as grok-4.7."""
+    if str(event.get("type") or "") != "error":
+        return False
+    message = event.get("message")
+    if not isinstance(message, str):
+        return False
+    lowered = message.lower()
+    return "unknown model id" in lowered and "couldn't set model" in lowered
+
+
+def _cached_model_ids() -> set[str]:
+    from grok_proxy.model_resolve import load_models_from_cache
+
+    found = load_models_from_cache()
+    if found is None:
+        return set()
+    return set(found.available)
 
 
 @dataclass
@@ -109,10 +137,9 @@ def build_grok_argv(opts: GrokRunOptions) -> list[str]:
 
 def _child_env(extra: dict[str, str] | None) -> dict[str, str]:
     env = os.environ.copy()
-    env.setdefault("GROK_DISABLE_AUTOUPDATER", "1")
     if extra:
         env.update(extra)
-    return env
+    return apply_grok_cli_env(env)
 
 
 async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
@@ -218,9 +245,11 @@ class GrokRunner:
         grok_bin: str = "grok",
         *,
         process_manager: Any | None = None,
+        catalog_miss_retry_delay: float = 1.0,
     ) -> None:
         self.grok_bin = grok_bin
         self.process_manager = process_manager
+        self.catalog_miss_retry_delay = catalog_miss_retry_delay
 
     def _ensure_bin(self, binary: str) -> None:
         path = Path(binary)
@@ -339,10 +368,51 @@ class GrokRunner:
         return result
 
     async def stream(self, opts: GrokRunOptions) -> AsyncIterator[dict[str, Any]]:
-        """Yield parsed streaming-json event dicts; final yield may be synthetic error."""
+        """Yield parsed streaming-json event dicts; final yield may be synthetic error.
+
+        When grok rejects a cache-known catalog id before its own catalog
+        retry, spawn one more process and do not surface the first rejection.
+        """
         opts = GrokRunOptions(**{**opts.__dict__, "stream": True})
         opts.grok_bin = opts.grok_bin or self.grok_bin
         self._ensure_bin(opts.grok_bin)
+        retries_left = CATALOG_MISS_RETRIES
+        while True:
+            retry = False
+            yielded = False
+            async for event in self._stream_once(opts):
+                # Only the opening rejection is retried. Once tokens or tool
+                # events have been forwarded, a later error belongs to the caller.
+                if (
+                    not yielded
+                    and retries_left
+                    and self._should_retry_catalog_miss(event, opts.model)
+                ):
+                    retries_left -= 1
+                    retry = True
+                    logger.warning(
+                        "grok rejected model %s before its catalog loaded; retrying the run",
+                        opts.model,
+                    )
+                    break
+                yielded = True
+                yield event
+            if not retry:
+                return
+            delay = self.catalog_miss_retry_delay
+            if delay > 0:
+                await asyncio.sleep(delay + random.uniform(0, min(delay, 0.5)))
+
+    def _should_retry_catalog_miss(self, event: dict[str, Any], model: str) -> bool:
+        if not model or not is_unloaded_catalog_model_error(event):
+            return False
+        # A typo is not in the on-disk catalog. Retrying would only delay
+        # the same rejection. grok-4.7 is cached even when this process's
+        # models() is still grok-4.6 / grok-4.5.
+        return model in _cached_model_ids()
+
+    async def _stream_once(self, opts: GrokRunOptions) -> AsyncIterator[dict[str, Any]]:
+        """One grok process. Caller decides whether a catalog miss is retried."""
         cmd = build_grok_argv(opts)
 
         track_id = getattr(opts, "track_id", None) or f"run_{os.getpid()}_{id(opts)}"

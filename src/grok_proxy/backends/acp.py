@@ -96,8 +96,9 @@ class AcpBackend:
 
     async def start_session(self, request: BackendSessionRequest) -> BackendSession:
         cmd = [self.grok_bin, *self.agent_args]
-        env = os.environ.copy()
-        env.setdefault("GROK_DISABLE_AUTOUPDATER", "1")
+        from grok_proxy.cli_env import apply_grok_cli_env
+
+        env = apply_grok_cli_env(os.environ.copy())
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
+import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -86,11 +89,214 @@ class RuntimeModels:
     source: str = "fallback"  # cache | cli | config | fallback
 
 
+@dataclass(frozen=True)
+class ModelSnapshot:
+    """A model list plus refresh state exposed to diagnostics and MCP."""
+
+    runtime: RuntimeModels
+    last_attempt_at: float | None = None
+    last_success_at: float | None = None
+    last_error: str | None = None
+    stale: bool = False
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "models": list(self.runtime.available),
+            "default_model": self.runtime.default_model,
+            "source": self.runtime.source,
+            "last_attempt_at": self.last_attempt_at,
+            "last_success_at": self.last_success_at,
+            "last_error": self.last_error,
+            "stale": self.stale,
+        }
+
+
+def _copy_runtime_models(runtime: RuntimeModels) -> RuntimeModels:
+    return RuntimeModels(
+        default_model=runtime.default_model,
+        available=list(runtime.available),
+        source=runtime.source,
+    )
+
+
+class RuntimeModelRegistry:
+    """Keep a process-local model snapshot fresh without blocking the loop.
+
+    ``configured_default`` and ``configured_models`` are the original user
+    values captured before startup resolves automatic settings. This prevents
+    a previous discovery result from becoming an accidental fixed config on a
+    later refresh.
+    """
+
+    def __init__(
+        self,
+        *,
+        initial: RuntimeModels,
+        configured_default: str | None = None,
+        configured_models: str | None = None,
+        grok_bin: str = "grok",
+        refresh_interval_sec: float = 1_800,
+    ) -> None:
+        self._runtime = _copy_runtime_models(initial)
+        self._configured_default = (configured_default or "").strip()
+        self._configured_models = configured_models or ""
+        self._grok_bin = grok_bin
+        self._refresh_interval_sec = max(float(refresh_interval_sec), 0.0)
+        now = time.time()
+        monotonic_now = time.monotonic()
+        self._last_attempt_at: float | None = now
+        self._last_success_at: float | None = now if initial.source != "fallback" else None
+        self._last_success_monotonic: float | None = (
+            monotonic_now if initial.source != "fallback" else None
+        )
+        self._retry_after_monotonic = 0.0
+        self._last_error: str | None = (
+            "initial model discovery used fallback" if initial.source == "fallback" else None
+        )
+        self._catalog_stamp = catalog_stamp(grok_bin)
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_event: asyncio.Event | None = None
+
+    def _is_stale(self) -> bool:
+        if self._last_success_monotonic is None:
+            return True
+        # A catalog fetch or CLI upgrade can land while the TTL is still
+        # running. WorkBuddy lists models without ?refresh=true, so the next
+        # read has to notice the new file instead of waiting out the interval.
+        if catalog_stamp(self._grok_bin) != self._catalog_stamp:
+            return True
+        if self._refresh_interval_sec <= 0:
+            return True
+        return time.monotonic() - self._last_success_monotonic >= self._refresh_interval_sec
+
+    def snapshot(self) -> ModelSnapshot:
+        return ModelSnapshot(
+            runtime=_copy_runtime_models(self._runtime),
+            last_attempt_at=self._last_attempt_at,
+            last_success_at=self._last_success_at,
+            last_error=self._last_error,
+            stale=self._is_stale(),
+        )
+
+    async def get(self, *, refresh: bool = False) -> ModelSnapshot:
+        """Return a snapshot, refreshing when forced or past its TTL."""
+        if refresh or (
+            self._is_stale() and time.monotonic() >= self._retry_after_monotonic
+        ):
+            return await self.refresh(force=refresh)
+        return self.snapshot()
+
+    async def refresh(self, *, force: bool = True) -> ModelSnapshot:
+        """Refresh once and coalesce concurrent callers onto the same attempt."""
+        leader = False
+        async with self._refresh_lock:
+            if self._refresh_event is not None:
+                event = self._refresh_event
+            elif not force and (
+                not self._is_stale() or time.monotonic() < self._retry_after_monotonic
+            ):
+                return self.snapshot()
+            else:
+                event = asyncio.Event()
+                self._refresh_event = event
+                leader = True
+
+        if not leader:
+            await event.wait()
+            return self.snapshot()
+
+        try:
+            await self._refresh_once()
+        finally:
+            async with self._refresh_lock:
+                if self._refresh_event is event:
+                    self._refresh_event = None
+                event.set()
+        return self.snapshot()
+
+    async def _refresh_once(self) -> None:
+        self._last_attempt_at = time.time()
+        try:
+            runtime = await asyncio.to_thread(
+                resolve_runtime_models,
+                configured_default=self._configured_default,
+                configured_models=self._configured_models,
+                grok_bin=self._grok_bin,
+                prefer_cli=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = f"model refresh failed: {exc}"
+            self._retry_after_monotonic = time.monotonic() + self._failure_backoff_sec()
+            logger.exception("model refresh failed")
+            return
+
+        # A fallback means neither the CLI nor a usable cache was available.
+        # Keep the last successful list so a transient outage cannot change
+        # already-running clients to an arbitrary fallback model.
+        if runtime.source == "fallback":
+            self._last_error = "model refresh returned fallback; retained last successful snapshot"
+            self._retry_after_monotonic = time.monotonic() + self._failure_backoff_sec()
+            logger.warning(self._last_error)
+            return
+
+        self._runtime = _copy_runtime_models(runtime)
+        self._last_success_at = time.time()
+        self._last_success_monotonic = time.monotonic()
+        self._retry_after_monotonic = 0.0
+        self._last_error = None
+        # Stamp after the CLI returns. `grok models` rewrites the cache, and
+        # comparing that mtime with the pre-refresh stamp would refresh forever.
+        self._catalog_stamp = catalog_stamp(self._grok_bin)
+        logger.info(
+            "model refresh succeeded default=%s models=%s source=%s",
+            runtime.default_model,
+            runtime.available,
+            runtime.source,
+        )
+
+    def _failure_backoff_sec(self) -> float:
+        """Bound retries after an unavailable CLI/cache to one per minute."""
+        return min(max(self._refresh_interval_sec, 1.0), 60.0)
+
+
 def _grok_home() -> Path:
     env = os.environ.get("GROK_HOME", "").strip()
     if env:
         return Path(env).expanduser()
     return Path.home() / ".grok"
+
+
+def _file_stamp(path: Path) -> str:
+    try:
+        st = path.stat()
+    except OSError:
+        return "missing"
+    return f"{st.st_mtime_ns}:{st.st_size}"
+
+
+def _resolve_grok_bin(grok_bin: str) -> Path | None:
+    raw = (grok_bin or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if candidate.is_file():
+        return candidate
+    found = shutil.which(raw)
+    if not found:
+        return None
+    return Path(found)
+
+
+def catalog_stamp(grok_bin: str = "grok") -> str:
+    """Fingerprint the on-disk catalog and the grok binary.
+
+    Store the value after a successful discovery. A later difference means
+    ``models_cache.json`` was fetched or the CLI binary was replaced, even
+    when the refresh TTL has not elapsed.
+    """
+    binary = _resolve_grok_bin(grok_bin)
+    binary_stamp = _file_stamp(binary) if binary is not None else "unresolved"
+    return f"cache:{_file_stamp(_grok_home() / 'models_cache.json')}|bin:{binary_stamp}"
 
 
 def _read_models_cache_obj(cache_path: Path | None = None) -> dict[str, object] | None:
@@ -292,6 +498,8 @@ def load_models_from_cache(cache_path: Path | None = None) -> RuntimeModels | No
 
 
 def load_models_from_cli(grok_bin: str = "grok", timeout: float = 15.0) -> RuntimeModels | None:
+    from grok_proxy.cli_env import apply_grok_cli_env
+
     try:
         proc = subprocess.run(
             [grok_bin, "models"],
@@ -299,13 +507,23 @@ def load_models_from_cli(grok_bin: str = "grok", timeout: float = 15.0) -> Runti
             text=True,
             timeout=timeout,
             check=False,
+            env=apply_grok_cli_env(os.environ.copy()),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
         logger.debug("grok models failed: %s", e)
         return None
 
-    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    if proc.returncode != 0 and not text.strip():
+    if proc.returncode != 0:
+        logger.warning("grok models exited with code %s", proc.returncode)
+        return None
+
+    # The CLI writes diagnostics to stderr. Parse stdout only so a warning or
+    # error that happens to contain a dash cannot be mistaken for a model id.
+    text = (proc.stdout or "").strip()
+    if proc.stderr and proc.stderr.strip():
+        logger.debug("grok models diagnostics: %s", proc.stderr.strip())
+    if not text:
+        logger.warning("grok models returned no output")
         return None
 
     default: str | None = None
@@ -328,8 +546,52 @@ def load_models_from_cli(grok_bin: str = "grok", timeout: float = 15.0) -> Runti
     if not default and available:
         default = available[0]
     if not default:
+        logger.warning("grok models output did not contain a default model")
         return None
     return RuntimeModels(default_model=default, available=available, source="cli")
+
+
+def _merge_model_catalogs(
+    primary: RuntimeModels,
+    secondary: RuntimeModels | None,
+) -> RuntimeModels:
+    """Keep the primary order and default, then append ids only the secondary has.
+
+    Used when ``grok models`` exits 0 with the binary's built-in pair while
+    ``models_cache.json`` still has catalog-only ids such as grok-4.7.
+    """
+    if secondary is None:
+        return primary
+    available = list(primary.available)
+    seen = set(available)
+    extras = [mid for mid in secondary.available if mid not in seen]
+    if extras:
+        logger.info(
+            "model catalog merge kept %s ids missing from %s list: %s",
+            secondary.source,
+            primary.source,
+            extras,
+        )
+        available.extend(extras)
+    return RuntimeModels(
+        default_model=primary.default_model,
+        available=available,
+        source=primary.source,
+    )
+
+
+def _discover_model_catalog(grok_bin: str, *, prefer_cli: bool) -> RuntimeModels | None:
+    # Run the CLI before reading the cache. A successful `grok models`
+    # rewrites models_cache.json, and the merge must see that rewrite.
+    cli_models = load_models_from_cli(grok_bin)
+    cache_models = load_models_from_cache()
+    if prefer_cli:
+        if cli_models is not None:
+            return _merge_model_catalogs(cli_models, cache_models)
+        return cache_models
+    if cache_models is not None:
+        return _merge_model_catalogs(cache_models, cli_models)
+    return cli_models
 
 
 def resolve_runtime_models(
@@ -337,14 +599,16 @@ def resolve_runtime_models(
     configured_default: str | None = None,
     configured_models: str | None = None,
     grok_bin: str = "grok",
-    prefer_cli: bool = False,
+    prefer_cli: bool = True,
 ) -> RuntimeModels:
     """
     Resolve which model ids this proxy should advertise and use by default.
 
     Priority for available list:
-      1. GROK_PROXY_MODELS if non-empty (explicit)
-      2. grok models CLI (if prefer_cli) else models_cache.json then CLI
+      1. GROK_PROXY_MODELS if non-empty (explicit; not unioned with discovery)
+      2. automatic mode merges the CLI list and models_cache.json. The
+         preferred source supplies the default and order; the other source
+         only contributes ids the preferred list omitted.
       3. fallback grok-4.5
     """
     configured_default = (configured_default or "").strip()
@@ -357,11 +621,12 @@ def resolve_runtime_models(
     if configured_list == ["grok-build"] or all(m in MODEL_ALIASES for m in configured_list):
         configured_list = []
 
+    # A fixed default together with an explicit advertised list is already a
+    # complete configuration. Avoid spawning the CLI for every test/client
+    # process in that case. Automatic configurations still discover first.
     discovered: RuntimeModels | None = None
-    if prefer_cli:
-        discovered = load_models_from_cli(grok_bin) or load_models_from_cache()
-    else:
-        discovered = load_models_from_cache() or load_models_from_cli(grok_bin)
+    if not configured_list or not configured_default:
+        discovered = _discover_model_catalog(grok_bin, prefer_cli=prefer_cli)
 
     if configured_list:
         default = configured_default or (
@@ -395,6 +660,10 @@ def resolve_runtime_models(
         )
 
     default = configured_default or FALLBACK_MODEL
+    logger.warning(
+        "No Grok model list could be discovered; using fallback model %s",
+        default,
+    )
     return RuntimeModels(default_model=default, available=[default], source="fallback")
 
 

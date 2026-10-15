@@ -248,11 +248,12 @@ Response includes `grok.response_id` and `grok.session_id` for multi-turn resume
 uv run grok-proxy --mcp-stdio
 ```
 
-Tools: `grok_consult`, `grok_review`, `grok_delegate`, `grok_status`, `grok_cancel`, `grok_get_diff`, `grok_resume`.
+Tools: `grok_consult`, `grok_review`, `grok_delegate`, `grok_status`, `grok_models`, `grok_cancel`, `grok_get_diff`, `grok_resume`.
 
 `grok_consult` and `grok_review` run in the background by default and return a
 `response_id` immediately; poll with `grok_status`, or pass `background: false`
-to wait for one call to finish.
+to wait for one call to finish. Use `grok_models` with `{"refresh": true}` to
+force a model-list refresh; expired snapshots refresh automatically.
 
 </details>
 
@@ -318,7 +319,7 @@ Settings → MCP → Add server (stdio):
 }
 ```
 
-Qoder lists 7 tools. `grok_consult` / `grok_review` are read-only; `grok_delegate` runs in an isolated git worktree with `permission_policy=ask` by default.
+Qoder lists 8 tools. `grok_consult` / `grok_review` are read-only; `grok_models` shows or refreshes the runtime model snapshot; `grok_delegate` runs in an isolated git worktree with `permission_policy=ask` by default.
 
 </details>
 

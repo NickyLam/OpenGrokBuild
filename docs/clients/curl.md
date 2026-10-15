@@ -25,6 +25,10 @@ Authorization: Bearer $KEY
 ```bash
 curl -s http://127.0.0.1:8787/v1/models \
   -H "Authorization: Bearer $KEY" | jq .
+
+# Force a fresh CLI discovery (the normal endpoint refreshes expired snapshots)
+curl -s http://127.0.0.1:8787/v1/models?refresh=true \
+  -H "Authorization: Bearer $KEY" | jq .
 ```
 
 ## Connection snapshot (WorkBuddy fragment)

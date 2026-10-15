@@ -41,10 +41,14 @@ def build_responses_router(
         auth.require_scopes(Scope.RESPONSE_CREATE.value)
 
         orch = _orch(request)
-        runtime = request.app.state.runtime_models
+        registry = getattr(request.app.state, "model_registry", None)
+        if registry is not None:
+            runtime = (await registry.get()).runtime
+        else:
+            runtime = request.app.state.runtime_models
         from grok_proxy.model_resolve import resolve_request_model
 
-        model = resolve_request_model(body.model or cfg.default_model, runtime)
+        model = resolve_request_model(body.model, runtime)
         xg_data: dict[str, Any] = {}
         if body.x_grok is not None:
             xg_data = body.x_grok.model_dump(exclude_none=True)

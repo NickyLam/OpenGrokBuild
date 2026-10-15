@@ -82,6 +82,15 @@ class Settings(BaseSettings):
         default="",
         validation_alias=_alias("GROK_PROXY_MODELS", "models"),
     )
+    # Runtime model snapshot refresh interval. Zero refreshes on every model
+    # lookup; use the MCP/HTTP refresh switch for an immediate one-off update.
+    model_refresh_interval_sec: int = Field(
+        default=1800,
+        validation_alias=_alias(
+            "GROK_PROXY_MODEL_REFRESH_INTERVAL_SEC",
+            "model_refresh_interval_sec",
+        ),
+    )
     # Scheme B extensions
     backend: str = Field(
         default="headless",

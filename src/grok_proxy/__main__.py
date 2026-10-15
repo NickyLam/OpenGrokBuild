@@ -8,14 +8,20 @@ from pathlib import Path
 
 import uvicorn
 
-from grok_proxy.bootstrap import bootstrap_settings
+from grok_proxy.bootstrap import bootstrap_settings, resolve_model_settings
 from grok_proxy.config import get_settings
+from grok_proxy.model_resolve import RuntimeModelRegistry
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="grok-proxy",
         description="Grok Build Agent Gateway (HTTP + MCP)",
+    )
+    p.add_argument(
+        "--catalog-dns-bypass",
+        action="store_true",
+        help="Use public DNS through a local HTTPS tunnel for the Grok catalog (VPN DNS repair)",
     )
     p.add_argument(
         "--host",
@@ -76,7 +82,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _run_mcp_stdio(settings, database_path: str | None) -> None:
+def _run_mcp_stdio(
+    settings,
+    database_path: str | None,
+    *,
+    model_registry: RuntimeModelRegistry | None = None,
+) -> None:
     from grok_proxy.backends.acp import select_backend
     from grok_proxy.concurrency import ConcurrencyGate, PerKeyConcurrencyTracker
     from grok_proxy.grok_runner import GrokRunner
@@ -115,7 +126,12 @@ def _run_mcp_stdio(settings, database_path: str | None) -> None:
         gate=gate,
         per_key_gate=per_key,
     )
-    router = McpToolRouter(orch, default_model=settings.default_model)
+    router = McpToolRouter(
+        orch,
+        default_model=settings.default_model,
+        available_models=settings.model_ids(),
+        model_registry=model_registry,
+    )
     try:
         asyncio.run(run_mcp_stdio(router))
     finally:
@@ -132,6 +148,13 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
     args = _parse_args(argv)
+    from grok_proxy.catalog_dns import catalog_dns_proxy
+
+    with catalog_dns_proxy(enabled=args.catalog_dns_bypass):
+        _run(args)
+
+
+def _run(args: argparse.Namespace) -> None:
     settings = get_settings()
 
     if args.host:
@@ -142,7 +165,11 @@ def main(argv: list[str] | None = None) -> None:
         settings.database_path = args.database_path
 
     if args.mcp_stdio:
-        # Minimal bootstrap for key presence without binding HTTP
+        # Model discovery is required whether the key is generated here or
+        # was supplied by Codex's MCP environment.
+        model_registry: RuntimeModelRegistry
+        configured_default = settings.default_model
+        configured_models = settings.models
         if not settings.api_key.strip():
             result = bootstrap_settings(
                 settings,
@@ -152,7 +179,17 @@ def main(argv: list[str] | None = None) -> None:
                 print_banner=False,
             )
             settings = result.settings
-        _run_mcp_stdio(settings, args.database_path)
+            model_registry = result.model_registry
+        else:
+            runtime = resolve_model_settings(settings)
+            model_registry = RuntimeModelRegistry(
+                initial=runtime,
+                configured_default=configured_default,
+                configured_models=configured_models,
+                grok_bin=settings.grok_bin,
+                refresh_interval_sec=settings.model_refresh_interval_sec,
+            )
+        _run_mcp_stdio(settings, args.database_path, model_registry=model_registry)
         return
 
     def _install_flag(yes: bool, no: bool) -> bool | None:
@@ -177,8 +214,21 @@ def main(argv: list[str] | None = None) -> None:
     if args.print_config_only:
         sys.exit(0)
 
+    # Keep the registry created during bootstrap attached to the long-running
+    # app. Passing an app instance avoids re-importing settings after bootstrap
+    # has materialized an automatic model into environment variables; a
+    # re-import would otherwise mistake that derived value for fixed config
+    # and disable later TTL refreshes.
+    from grok_proxy.main import create_app
+
+    application = create_app(
+        result.settings,
+        bootstrap=False,
+        runtime_models=result.runtime_models,
+        model_registry=result.model_registry,
+    )
     uvicorn.run(
-        "grok_proxy.main:app",
+        application,
         host=result.settings.host,
         port=result.settings.port,
         log_level="info",
@@ -188,4 +238,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-
